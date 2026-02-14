@@ -112,6 +112,52 @@ class _TelegramLogHandler:
 
 
 class _TelegramChatHandler:
+    def _session_store(self):
+        """
+        Best-effort Busy38 session store.
+
+        This repo can be used standalone; when not vendored into Busy core, this
+        import may fail and should be treated as a no-op.
+        """
+        try:
+            from core.session import SessionStore  # type: ignore
+
+            return SessionStore()
+        except Exception:
+            return None
+
+    def _session_log_outbound(self, *, chat_id: str, text: str, metadata: Dict[str, Any]) -> None:
+        st = self._session_store()
+        if st is None:
+            return
+        surface_id = f"telegram:{str(chat_id)}"
+        try:
+            sid = st.get_bound_session(surface_id=surface_id)
+            if not sid and os.getenv("TELEGRAM_SESSION_AUTO_BIND", "1").strip().lower() not in ("0", "false", "no", "off"):
+                sid = st.create_session(
+                    title=f"Telegram {chat_id}",
+                    workspace_root="",
+                    writer_id=f"telegram:{os.getpid()}",
+                    metadata={"transport": "telegram", "surface_id": surface_id, **(metadata or {})},
+                )
+                st.bind_surface(surface_id=surface_id, session_id=sid)
+            if not sid:
+                return
+            st.append_event(
+                session_id=sid,
+                writer_id=f"telegram:{os.getpid()}",
+                type="chat.message",
+                payload={
+                    "transport": "telegram",
+                    "surface_id": surface_id,
+                    "role": "assistant",
+                    "text": str(text or ""),
+                    "metadata": metadata or {},
+                },
+            )
+        except Exception:
+            return
+
     async def execute(self, action: str, **kwargs: Any) -> Any:
         act = (action or "").strip().lower()
         action_map = {
@@ -147,25 +193,46 @@ class _TelegramChatHandler:
 
         bot = await self._get_bot()
         mgr = ChatManager(bot)
-        return await mgr.send_message(
+        res = await mgr.send_message(
             chat_id=str(chat_id),
             text=str(text or ""),
             reply_to=str(reply_to) if reply_to else None,
             parse_mode=kwargs.get("parse_mode"),
             silent=bool(silent),
         )
+        if res and res.get("success"):
+            self._session_log_outbound(
+                chat_id=str(chat_id),
+                text=str(text or ""),
+                metadata={
+                    "action": "tchat:send",
+                    "message_id": res.get("message_id"),
+                    "timestamp": res.get("timestamp"),
+                },
+            )
+        return res
 
     async def _edit(self, chat_id: str, message_id: str, text: str, **kwargs: Any):
         from .chat_manager import ChatManager
 
         bot = await self._get_bot()
         mgr = ChatManager(bot)
-        return await mgr.edit_message(
+        res = await mgr.edit_message(
             chat_id=str(chat_id),
             message_id=str(message_id),
             text=str(text or ""),
             parse_mode=kwargs.get("parse_mode"),
         )
+        if res and res.get("success"):
+            self._session_log_outbound(
+                chat_id=str(chat_id),
+                text=str(text or ""),
+                metadata={
+                    "action": "tchat:edit",
+                    "message_id": str(message_id),
+                },
+            )
+        return res
 
     async def _delete(self, chat_id: str, message_id: str, **_: Any):
         from .chat_manager import ChatManager

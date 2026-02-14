@@ -8,7 +8,7 @@ Implementation path: `toolkit/telegram_bot.py`
 
 Key behavior:
 - Ingests all channel traffic and decides when to respond.
-- Supports subscribe/follow controls for channels.
+- Supports subscribe controls for chats (in-memory in current runtime).
 - Applies 24h recency bias by default for context/search.
 - Supports silent acknowledgements via emoji reactions.
 - Uses anti-spam guardrails for high-traffic channels.
@@ -35,7 +35,7 @@ Example:
 
 Parameters:
 - `query` (string, required): literal unless `regex=true`
-- `chat_id` (string, required): Telegram chat ID
+- `chat_id` (string, optional): Telegram chat ID (omit to search all telegram logs)
 - `max_age_hours` (int, default 24): 0 disables age filter
 - `max_messages` (int, default 5000): max messages scanned
 - `context` (int, default 80): context window in characters
@@ -135,6 +135,16 @@ Get chat information:
 Get chat members (requires admin rights):
 ```text
 [tchat:get_members chat_id="-1001234567890" limit=100 /]
+```
+
+### `tchat:read`
+
+Read recent messages from Busy38 local chat logs (DuckDB `chat_entries`) for a Telegram chat.
+
+This does not fetch history from the Telegram API (Telegram bots generally cannot read arbitrary back-history).
+
+```text
+[tchat:read chat_id="-1001234567890" limit=50 max_age_hours=24 /]
 ```
 
 ## Namespace: `tgroup`

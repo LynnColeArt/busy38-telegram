@@ -30,7 +30,7 @@ busy-38-telegram/
 
 ### tchat - Chat Messaging
 - `send` - Send messages to chats
-- `read` - Read recent messages
+- `read` - Read recent messages from Busy38 local chat logs
 - `edit` - Edit sent messages
 - `delete` - Delete messages
 - `poll` - Create polls

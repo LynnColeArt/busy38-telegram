@@ -128,7 +128,7 @@ namespaces:
             timestamp: { type: string }
 
       read:
-        description: Read recent messages from a chat.
+        description: Read recent messages from Busy38 local chat logs for this Telegram chat (DuckDB chat_entries).
         parameters:
           chat_id:
             type: string
@@ -138,11 +138,12 @@ namespaces:
             type: integer
             required: false
             default: 50
-            description: Number of messages to fetch
-          since_id:
-            type: string
+            description: Number of messages to return (chronological)
+          max_age_hours:
+            type: integer
             required: false
-            description: Fetch messages newer than this ID
+            default: 24
+            description: Only include messages newer than this age (0 disables age filter)
         returns:
           type: object
           properties:
