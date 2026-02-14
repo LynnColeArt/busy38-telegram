@@ -22,6 +22,29 @@ Core env controls:
 - `TELEGRAM_FOLLOW_SPAM_MAX_EVENTS` (default `12`)
 - `TELEGRAM_FOLLOW_SPAM_COOLDOWN_SEC` (default `45`)
 - `TELEGRAM_ATTACHMENT_INCLUDE_META` (default `1`)
+- `TELEGRAM_CLEAR_WINDOW_HOURS` (default `72`)
+- `TELEGRAM_CLEAR_MAX_MESSAGES` (default `1200`)
+- `TELEGRAM_AUTO_CLEAR_ENABLE` (default `0`)
+- `TELEGRAM_AUTO_CLEAR_INTERVAL_SEC` (default `900`)
+- `TELEGRAM_AUTO_CLEAR_MIN_GAP_SEC` (default `21600`)
+- `TELEGRAM_CLEAR_STATE_PATH` (default `./data/telegram_clear_state.json`)
+- `TELEGRAM_STATUS_ENABLE` (default `0`)
+- `TELEGRAM_STATUS_MODE` (`edit` or `message`, default `edit`)
+- `TELEGRAM_STATUS_STYLE` (`implicit` or `explicit`, default `implicit`)
+- `TELEGRAM_STATUS_DELAY_SEC` (default `1.5`)
+- `TELEGRAM_STATUS_MIN_INTERVAL_SEC` (default `2.5`)
+- `TELEGRAM_STATUS_DELETE_ON_FINISH` (default `1`)
+
+## Moderator Commands
+
+### `/clear [hours]`
+
+Summarize the last N hours (default 72) using Busy38 local transcripts and pin the summary message.
+
+Notes:
+- Requires admin in group/supergroup/channel chats.
+- Reads `chat_entries` only (local-first), it does not fetch Telegram back-history.
+ 
 
 ## Namespace: `tlog`
 

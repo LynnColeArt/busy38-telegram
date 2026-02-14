@@ -9,6 +9,8 @@ This plugin mirrors the Discord integration functionality for Telegram, enabling
 - Chat history search and transcripts
 - Group/channel management
 - Polling and interactive features
+- Moderator context reset via `/clear` (summary + pin)
+- Optional Busy hook-driven status narration while tools run
 
 ## Structure
 
@@ -50,3 +52,8 @@ GPL-3.0-only - See LICENSE file for details.
 ## Integration
 
 Part of the Busy38 vendor toolkit ecosystem.
+
+## Runtime Commands
+
+- `/subscribe` / `/unsubscribe` / `/follow on|off` / `/subs`
+- `/clear [hours]` (admin-only in groups): summarize local context and pin the summary

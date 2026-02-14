@@ -25,6 +25,8 @@ from typing import Any, Dict, Optional
 from core.cheatcodes.registry import register_namespace
 
 logger = logging.getLogger(__name__)
+_heartbeat_hook_registered = False
+_status_hook_registered = False
 
 
 def _truthy(raw: str) -> bool:
@@ -34,6 +36,143 @@ def _truthy(raw: str) -> bool:
 
 def _changelog_dir() -> str:
     return os.getenv("BUSY38_CHATLOG_DIR", "./data/memory")
+
+
+def _schedule_coro(coro) -> None:
+    try:
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        loop.create_task(coro)
+    except Exception:
+        return
+
+
+def _status_activity_for_cheatcode(namespace: str, action: str, attributes: Dict[str, Any]) -> Optional[str]:
+    ns = str(namespace or "").strip().lower()
+    act = str(action or "").strip().lower()
+
+    if ns == "rw4":
+        if act == "read_file":
+            return "opening a file"
+        if act == "read_range":
+            return "reading a file section"
+        if act == "write_file":
+            return "writing a file"
+        if act == "list":
+            return "checking the workspace"
+        if act == "shell":
+            return "running a command"
+        if act == "git_status":
+            return "checking git status"
+        if act == "git_diff":
+            return "reviewing changes"
+        if act == "git_commit":
+            return "committing changes"
+        if act == "lsp_diagnostics":
+            return "checking diagnostics"
+
+    if ns == "tlog":
+        if act == "search":
+            return "searching the chat history"
+        if act == "around":
+            return "reviewing recent context"
+
+    if ns == "tchat":
+        if act == "send":
+            return "posting an update"
+        if act == "edit":
+            return "updating a message"
+        if act == "delete":
+            return "cleaning up a message"
+        if act == "pin":
+            return "pinning a note"
+        if act == "unpin":
+            return "unpinning a note"
+
+    return None
+
+
+def _maybe_register_heartbeat_jobs() -> None:
+    """
+    Register heartbeat hook callback that installs telegram auto-clear jobs.
+
+    This remains plugin-local and only activates if heartbeat hooks are available.
+    """
+    global _heartbeat_hook_registered
+    if _heartbeat_hook_registered:
+        return
+    _heartbeat_hook_registered = True
+
+    try:
+        from core.hooks import on_heartbeat_register_jobs
+    except Exception:
+        logger.debug("Heartbeat hooks unavailable; skipping telegram auto-clear hook registration")
+        return
+
+    from .telegram_runtime import run_auto_clear_cycle
+
+    @on_heartbeat_register_jobs(priority=20)
+    def _register_telegram_jobs(manager, context=None):
+        if not _truthy(os.getenv("TELEGRAM_AUTO_CLEAR_ENABLE", "0")):
+            return
+        interval = max(60, int(os.getenv("TELEGRAM_AUTO_CLEAR_INTERVAL_SEC", "900")))
+        manager.register_job(
+            name="telegram_auto_clear",
+            interval_seconds=interval,
+            source="plugin:busy38-telegram",
+            run_immediately=False,
+            callback=run_auto_clear_cycle,
+            metadata={
+                "window_hours": int(os.getenv("TELEGRAM_CLEAR_WINDOW_HOURS", "72")),
+                "min_gap_sec": int(os.getenv("TELEGRAM_AUTO_CLEAR_MIN_GAP_SEC", "21600")),
+            },
+        )
+
+
+def _maybe_register_status_hooks() -> None:
+    """
+    Register hook handlers that can narrate tool/cheatcode progress in Telegram.
+    """
+    global _status_hook_registered
+    if _status_hook_registered:
+        return
+    _status_hook_registered = True
+
+    try:
+        from core.hooks import on_pre_cheatcode_execute, on_post_agent_execute
+    except Exception:
+        logger.debug("Cheatcode hooks unavailable; skipping telegram status hook registration")
+        return
+
+    from .telegram_runtime import get_controller, get_active_context
+
+    @on_pre_cheatcode_execute(priority=40)
+    def _telegram_status_on_cheatcode(namespace: str, action: str, attributes: Dict[str, Any], context=None):
+        ctrl = get_controller()
+        if ctrl is None:
+            return
+        ctx = get_active_context() or {}
+        chat_id = ctx.get("chat_id")
+        if not chat_id:
+            return
+
+        activity = _status_activity_for_cheatcode(namespace, action, attributes or {})
+        if not activity:
+            return
+
+        _schedule_coro(ctrl.post_status(chat_id=str(chat_id), activity=activity))
+
+    @on_post_agent_execute(priority=80)
+    def _telegram_status_on_agent_finish(agent, context=None):
+        ctrl = get_controller()
+        if ctrl is None:
+            return
+        ctx = get_active_context() or {}
+        chat_id = ctx.get("chat_id")
+        if not chat_id:
+            return
+        _schedule_coro(ctrl.clear_status(chat_id=str(chat_id)))
 
 
 @dataclass
@@ -378,6 +517,10 @@ class Toolkit:
     """Vendor plugin entry point (auto-instantiated by PluginManager)."""
 
     def __init__(self):
+        # Optional integrations that depend on Busy core hook system.
+        _maybe_register_heartbeat_jobs()
+        _maybe_register_status_hooks()
+
         # Transcript tools are local-first and should be safe to register even if
         # telegram deps aren't installed (they only need duckdb).
         try:
