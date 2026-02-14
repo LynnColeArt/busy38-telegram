@@ -22,7 +22,7 @@ Core env controls:
 
 ## Namespace: `tlog`
 
-Transcript tools backed by local message cache and Busy38's chat entries.
+Transcript tools backed by Busy38 local chat entries (DuckDB `chat_entries`).
 
 ### `tlog:search`
 
@@ -45,9 +45,9 @@ Parameters:
 
 Returns:
 - `{success: true, results: [...]}` where each result includes:
-  - `id`: `telegram:<message_id>`
+  - `id`: `telegram:<chat_id>:<message_id>`
   - `timestamp`
-  - `chat_id`
+  - `project_id` (`telegram:<chat_id>`)
   - `snippets`: list of context strings
   - `metadata`: author info, match positions
 
@@ -67,7 +67,7 @@ Parameters:
 - `after` (int, default 8)
 
 Returns:
-- `{success: true, messages: [...]}` with context messages
+- `{success: true, rows: [...]}` with context rows (chronological window)
 
 ## Namespace: `tchat`
 
@@ -177,7 +177,7 @@ Set user permissions:
 
 ## Security Notes
 
-- `tlog:*` reads local message cache; does not fetch from Telegram API for search
+- `tlog:*` reads local DuckDB chat logs only; it does not fetch from Telegram API for search
 - `tchat:*` and `tgroup:*` use Telegram Bot API and require appropriate bot permissions
 - Bot must be admin to use `tgroup:*` operations
 - Cognitive Desktop pattern ensures agent thinks before speaking

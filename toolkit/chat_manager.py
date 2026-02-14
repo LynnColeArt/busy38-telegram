@@ -16,7 +16,6 @@ from telegram import (
     Message,
     Chat,
     ChatMember,
-    Poll,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup
 )
@@ -189,7 +188,8 @@ class ChatManager:
         Implements tchat:poll tool.
         """
         try:
-            poll: Poll = await self.bot.send_poll(
+            # python-telegram-bot returns a Message for send_poll; poll details live on message.poll
+            message: Message = await self.bot.send_poll(
                 chat_id=chat_id,
                 question=question,
                 options=options,
@@ -198,12 +198,19 @@ class ChatManager:
                 reply_to_message_id=int(reply_to) if reply_to else None,
             )
             
-            logger.info(f"Sent poll {poll.id} to chat {chat_id}")
+            poll_id = None
+            try:
+                if getattr(message, "poll", None) is not None:
+                    poll_id = message.poll.id
+            except Exception:
+                poll_id = None
+
+            logger.info(f"Sent poll {poll_id or '<unknown>'} to chat {chat_id}")
             
             return {
                 'success': True,
-                'poll_id': poll.id,
-                'message_id': str(poll.message.message_id) if poll.message else None,
+                'poll_id': poll_id,
+                'message_id': str(message.message_id),
             }
             
         except Exception as e:

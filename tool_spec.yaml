@@ -9,7 +9,7 @@ summary: >
 
 namespaces:
   tlog:
-    description: Telegram transcript tools backed by Busy38 chat logs.
+    description: Telegram transcript tools backed by Busy38 local chat logs (DuckDB chat_entries).
     actions:
       search:
         description: Search Telegram chat history with snippet windows.
@@ -56,16 +56,18 @@ namespaces:
                 properties:
                   id: { type: string }
                   timestamp: { type: string }
-                  chat_id: { type: string }
-                  content: { type: string }
-                  author: { type: string }
+                  project_id: { type: string }
+                  snippets:
+                    type: array
+                    items: { type: string }
+                  metadata: { type: object }
       around:
         description: Get context around a specific message.
         parameters:
           message_id:
             type: string
             required: true
-            description: Telegram message ID
+            description: Telegram message ID (or fully-qualified telegram:<chat_id>:<message_id>)
           chat_id:
             type: string
             required: true
@@ -84,15 +86,16 @@ namespaces:
           type: object
           properties:
             success: { type: boolean }
-            messages:
+            rows:
               type: array
               items:
                 type: object
                 properties:
                   id: { type: string }
                   timestamp: { type: string }
+                  project_id: { type: string }
                   content: { type: string }
-                  author: { type: string }
+                  metadata: { type: object }
 
   tchat:
     description: Telegram chat messaging and operations.

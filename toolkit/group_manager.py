@@ -50,36 +50,20 @@ class GroupManager:
         For private groups, user must be added directly.
         """
         try:
-            # For channels/groups, we can use create_chat_invite_link
-            # and send it to the user, or add directly if we're admins
+            # Bots typically cannot "add user by id" into a group/channel without
+            # the user joining. The durable approach is to create an invite link.
+            invite = await self.bot.create_chat_invite_link(
+                chat_id=chat_id,
+                member_limit=1,  # Single-use
+            )
             
-            # Try to add user directly first (if we have permission)
-            try:
-                result = await self.bot.add_chat_members(
-                    chat_id=chat_id,
-                    user_ids=[int(user_id)]
-                )
-                
-                logger.info(f"Added user {user_id} to chat {chat_id}")
-                return {
-                    'success': True,
-                    'method': 'direct_add',
-                }
-                
-            except Exception as add_error:
-                # If direct add fails, create invite link
-                invite = await self.bot.create_chat_invite_link(
-                    chat_id=chat_id,
-                    member_limit=1,  # Single-use
-                )
-                
-                logger.info(f"Created invite link for user {user_id} to chat {chat_id}")
-                return {
-                    'success': True,
-                    'method': 'invite_link',
-                    'invite_link': invite.invite_link,
-                    'note': 'Send this link to the user',
-                }
+            logger.info(f"Created invite link for user {user_id} to chat {chat_id}")
+            return {
+                'success': True,
+                'method': 'invite_link',
+                'invite_link': invite.invite_link,
+                'note': 'Send this link to the user',
+            }
                 
         except Exception as e:
             logger.error(f"Failed to invite user: {e}")

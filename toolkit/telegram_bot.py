@@ -15,7 +15,7 @@ import os
 import logging
 import asyncio
 from typing import Optional, Dict, Any, Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # Telegram Bot API
 from telegram import Update, Message, Chat
@@ -63,8 +63,28 @@ class Busy38TelegramBot:
         self.subscribed_chats: set[str] = set()
         self.recent_events: list[datetime] = []
         self._running = False
+        self._transcript = None
         
         logger.info("Busy38TelegramBot initialized")
+
+    def _transcript_logger(self):
+        """
+        Lazy init transcript logger (DuckDB chat_entries).
+
+        This keeps the runtime usable even if duckdb isn't installed; the bot can
+        still run, but transcript search won't be available.
+        """
+        if self._transcript is not None:
+            return self._transcript
+        try:
+            from .telegram_transcript import TelegramTranscriptLogger
+
+            data_dir = os.getenv("BUSY38_CHATLOG_DIR", "./data/memory")
+            self._transcript = TelegramTranscriptLogger(data_dir=data_dir)
+        except Exception as exc:
+            logger.warning("TelegramTranscriptLogger unavailable: %s", exc)
+            self._transcript = None
+        return self._transcript
     
     async def initialize(self) -> bool:
         """
@@ -176,6 +196,36 @@ class Busy38TelegramBot:
             'is_reply': message.reply_to_message is not None,
             'reply_to_message_id': str(message.reply_to_message.message_id) if message.reply_to_message else None,
         }
+
+        # Persist to Busy38 chat_entries (local-first) for pattern search + boards.
+        try:
+            tl = self._transcript_logger()
+            if tl is not None:
+                ts = message.date
+                if ts is None:
+                    ts = datetime.now(timezone.utc)
+                elif ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+
+                author = message.from_user
+                tl.log_message(
+                    chat_id=chat_id,
+                    message_id=str(message.message_id),
+                    timestamp=ts,
+                    content=message.text or "",
+                    metadata={
+                        "transport": "telegram",
+                        "chat_id": chat_id,
+                        "message_id": str(message.message_id),
+                        "author_id": str(author.id) if author else None,
+                        "author_username": getattr(author, "username", None) if author else None,
+                        "author_first_name": getattr(author, "first_name", None) if author else None,
+                        "is_bot": bool(getattr(author, "is_bot", False)) if author else False,
+                    },
+                    participants=[int(author.id)] if author and getattr(author, "id", None) is not None else None,
+                )
+        except Exception as e:
+            logger.debug(f"Transcript log failed: {e}")
         
         logger.debug(f"Processing message {msg_data['id']} from chat {chat_id}")
         
@@ -195,7 +245,19 @@ class Busy38TelegramBot:
         try:
             # React with first emoji in list
             emoji = self.no_response_emojis[0] if self.no_response_emojis else '👍'
-            await message.set_reaction(emoji)
+            # Telegram reaction support is version-dependent. Try the most direct method,
+            # then fall back to bot API if available.
+            try:
+                await message.set_reaction(emoji)  # type: ignore[attr-defined]
+            except Exception:
+                try:
+                    await context.bot.set_message_reaction(  # type: ignore[attr-defined]
+                        chat_id=message.chat_id,
+                        message_id=message.message_id,
+                        reaction=[{"type": "emoji", "emoji": emoji}],
+                    )
+                except Exception:
+                    raise
             logger.debug(f"Sent acknowledgment {emoji} to message {message.message_id}")
         except Exception as e:
             logger.debug(f"Could not send acknowledgment: {e}")

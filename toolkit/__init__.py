@@ -1,16 +1,325 @@
-# Busy38 Telegram Integration Toolkit
-# Provides agent-facing tools for Telegram messaging and chat operations
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+"""
+busy-38-telegram vendor plugin toolkit.
 
-from .telegram_bot import Busy38TelegramBot
-from .chat_manager import ChatManager
-from .message_handler import MessageHandler
-from .group_manager import GroupManager
-from .transcript_logger import TranscriptLogger
+This repo is intended to be vendored into Busy38's `vendor/` directory.
 
-__all__ = [
-    'Busy38TelegramBot',
-    'ChatManager',
-    'MessageHandler',
-    'GroupManager',
-    'TranscriptLogger',
-]
+Key requirement: Busy38 discovers toolkits by importing `toolkit/__init__.py`
+and (optionally) instantiating a `Toolkit` class.
+
+We keep imports lazy so that:
+- `tlog:*` (local transcript search) can work with just DuckDB available.
+- `tchat:*`/`tgroup:*` require `python-telegram-bot`, but missing that
+  dependency doesn't prevent Busy from starting.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, Optional
+
+from core.cheatcodes.registry import register_namespace
+
+logger = logging.getLogger(__name__)
+
+
+def _truthy(raw: str) -> bool:
+    v = (raw or "").strip().lower()
+    return v not in ("", "0", "false", "no", "off")
+
+
+def _changelog_dir() -> str:
+    return os.getenv("BUSY38_CHATLOG_DIR", "./data/memory")
+
+
+@dataclass
+class _TelegramLogHandler:
+    data_dir: str
+
+    def __post_init__(self) -> None:
+        from .telegram_transcript import TelegramTranscriptLogger
+
+        self._logger = TelegramTranscriptLogger(data_dir=self.data_dir)
+
+    def execute(self, action: str, **kwargs: Any) -> Any:
+        action_map = {
+            "search": self._search,
+            "around": self._around,
+        }
+        fn = action_map.get((action or "").strip().lower())
+        if not fn:
+            return {"success": False, "error": f"Unknown action: {action}"}
+        return fn(**kwargs)
+
+    def _search(
+        self,
+        query: str,
+        chat_id: Optional[str] = None,
+        max_age_hours: int = 24,
+        max_messages: int = 5000,
+        context: int = 80,
+        case_sensitive: bool = False,
+        regex: bool = False,
+        snippets_per_message: int = 2,
+        max_results: int = 20,
+        **_: Any,
+    ) -> Dict[str, Any]:
+        since = None
+        if max_age_hours and int(max_age_hours) > 0:
+            since = datetime.now(timezone.utc) - timedelta(hours=int(max_age_hours))
+
+        project_id = f"telegram:{chat_id}" if chat_id else None
+        results = self._logger.search(
+            query=str(query or ""),
+            project_id=project_id,
+            since=since,
+            max_messages=int(max_messages),
+            context=int(context),
+            case_sensitive=bool(case_sensitive),
+            regex=bool(regex),
+            snippets_per_message=int(snippets_per_message),
+            max_results=int(max_results),
+        )
+        return {"success": True, "results": results}
+
+    def _around(
+        self,
+        message_id: str,
+        chat_id: Optional[str] = None,
+        before: int = 8,
+        after: int = 8,
+        **_: Any,
+    ) -> Dict[str, Any]:
+        mid = str(message_id or "").strip()
+        if not mid:
+            return {"success": False, "error": "message_id is required"}
+
+        # Telegram message ids are only unique per chat. Prefer the fully-qualified
+        # id that we store in chat_entries: telegram:<chat_id>:<message_id>.
+        if mid.startswith("telegram:"):
+            source_id = mid
+        else:
+            if not chat_id:
+                return {"success": False, "error": "chat_id is required when message_id is not prefixed"}
+            source_id = f"telegram:{str(chat_id)}:{mid}"
+
+        rows = self._logger.context_around(source_id=source_id, before=int(before), after=int(after))
+        return {"success": True, "rows": rows}
+
+
+class _TelegramChatHandler:
+    async def execute(self, action: str, **kwargs: Any) -> Any:
+        act = (action or "").strip().lower()
+        action_map = {
+            "send": self._send,
+            "edit": self._edit,
+            "delete": self._delete,
+            "poll": self._poll,
+            "pin": self._pin,
+            "unpin": self._unpin,
+            "get_info": self._get_info,
+            "get_members": self._get_members,
+            "read": self._read,  # local read from chat_entries
+        }
+        fn = action_map.get(act)
+        if not fn:
+            return {"success": False, "error": f"Unknown action: {action}"}
+        return await fn(**kwargs)
+
+    def _require_token(self) -> str:
+        tok = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        if not tok:
+            raise RuntimeError("Missing TELEGRAM_BOT_TOKEN (set env var or wire SquidKeys)")
+        return tok
+
+    async def _get_bot(self):
+        # Lazy import so the plugin can load even if telegram deps aren't installed.
+        from telegram import Bot
+
+        return Bot(token=self._require_token())
+
+    async def _send(self, chat_id: str, text: str, reply_to: Optional[str] = None, silent: bool = False, **kwargs: Any):
+        from .chat_manager import ChatManager
+
+        bot = await self._get_bot()
+        mgr = ChatManager(bot)
+        return await mgr.send_message(
+            chat_id=str(chat_id),
+            text=str(text or ""),
+            reply_to=str(reply_to) if reply_to else None,
+            parse_mode=kwargs.get("parse_mode"),
+            silent=bool(silent),
+        )
+
+    async def _edit(self, chat_id: str, message_id: str, text: str, **kwargs: Any):
+        from .chat_manager import ChatManager
+
+        bot = await self._get_bot()
+        mgr = ChatManager(bot)
+        return await mgr.edit_message(
+            chat_id=str(chat_id),
+            message_id=str(message_id),
+            text=str(text or ""),
+            parse_mode=kwargs.get("parse_mode"),
+        )
+
+    async def _delete(self, chat_id: str, message_id: str, **_: Any):
+        from .chat_manager import ChatManager
+
+        bot = await self._get_bot()
+        mgr = ChatManager(bot)
+        return await mgr.delete_message(chat_id=str(chat_id), message_id=str(message_id))
+
+    async def _poll(self, chat_id: str, question: str, options: Any, **kwargs: Any):
+        from .chat_manager import ChatManager
+
+        bot = await self._get_bot()
+        mgr = ChatManager(bot)
+        # tool_spec.yaml says options is an array; API_REFERENCE shows stringified example.
+        # We accept either.
+        opts = options
+        if isinstance(options, str):
+            # Comma-separated fallback.
+            opts = [s.strip() for s in options.split(",") if s.strip()]
+        return await mgr.send_poll(
+            chat_id=str(chat_id),
+            question=str(question or ""),
+            options=list(opts or []),
+            is_anonymous=bool(kwargs.get("is_anonymous", True)),
+            allows_multiple_answers=bool(kwargs.get("allows_multiple_answers", False)),
+            reply_to=str(kwargs.get("reply_to")) if kwargs.get("reply_to") else None,
+        )
+
+    async def _pin(self, chat_id: str, message_id: str, silent: bool = False, **_: Any):
+        from .chat_manager import ChatManager
+
+        bot = await self._get_bot()
+        mgr = ChatManager(bot)
+        return await mgr.pin_message(chat_id=str(chat_id), message_id=str(message_id), silent=bool(silent))
+
+    async def _unpin(self, chat_id: str, message_id: Optional[str] = None, **_: Any):
+        from .chat_manager import ChatManager
+
+        bot = await self._get_bot()
+        mgr = ChatManager(bot)
+        return await mgr.unpin_message(chat_id=str(chat_id), message_id=str(message_id) if message_id else None)
+
+    async def _get_info(self, chat_id: str, **_: Any):
+        from .chat_manager import ChatManager
+
+        bot = await self._get_bot()
+        mgr = ChatManager(bot)
+        return await mgr.get_chat_info(chat_id=str(chat_id))
+
+    async def _get_members(self, chat_id: str, limit: int = 100, **_: Any):
+        from .chat_manager import ChatManager
+
+        bot = await self._get_bot()
+        mgr = ChatManager(bot)
+        return await mgr.get_chat_members(chat_id=str(chat_id), limit=int(limit or 100))
+
+    async def _read(self, chat_id: str, limit: int = 50, max_age_hours: int = 24, **_: Any):
+        from .telegram_transcript import TelegramTranscriptLogger
+
+        lg = TelegramTranscriptLogger(data_dir=_changelog_dir())
+        since = None
+        if max_age_hours and int(max_age_hours) > 0:
+            since = datetime.now(timezone.utc) - timedelta(hours=int(max_age_hours))
+        rows = lg.recent_messages(project_id=f"telegram:{str(chat_id)}", since=since, limit=int(limit or 50))
+        # Return in a tool_spec.yaml-friendly shape.
+        msgs = []
+        for r in rows:
+            meta = r.get("metadata") or {}
+            author = meta.get("author_username") or meta.get("author_first_name") or meta.get("author_id") or ""
+            msgs.append(
+                {
+                    "id": str(r.get("id") or ""),
+                    "timestamp": str(r.get("timestamp") or ""),
+                    "from": str(author),
+                    "text": str(r.get("content") or ""),
+                }
+            )
+        return {"success": True, "messages": msgs}
+
+
+class _TelegramGroupHandler:
+    async def execute(self, action: str, **kwargs: Any) -> Any:
+        act = (action or "").strip().lower()
+        action_map = {
+            "invite": self._invite,
+            "ban": self._ban,
+            "unban": self._unban,
+            "set_permissions": self._set_permissions,
+        }
+        fn = action_map.get(act)
+        if not fn:
+            return {"success": False, "error": f"Unknown action: {action}"}
+        return await fn(**kwargs)
+
+    async def _get_bot(self):
+        from telegram import Bot
+
+        tok = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        if not tok:
+            raise RuntimeError("Missing TELEGRAM_BOT_TOKEN (set env var or wire SquidKeys)")
+        return Bot(token=tok)
+
+    async def _invite(self, chat_id: str, user_id: str, **_: Any):
+        from .group_manager import GroupManager
+
+        bot = await self._get_bot()
+        mgr = GroupManager(bot)
+        return await mgr.invite_user(chat_id=str(chat_id), user_id=str(user_id))
+
+    async def _ban(self, chat_id: str, user_id: str, until_date: Optional[int] = None, revoke_messages: bool = False, **_: Any):
+        from .group_manager import GroupManager
+
+        bot = await self._get_bot()
+        mgr = GroupManager(bot)
+        return await mgr.ban_user(
+            chat_id=str(chat_id),
+            user_id=str(user_id),
+            until_date=int(until_date) if until_date is not None else None,
+            revoke_messages=bool(revoke_messages),
+        )
+
+    async def _unban(self, chat_id: str, user_id: str, **_: Any):
+        from .group_manager import GroupManager
+
+        bot = await self._get_bot()
+        mgr = GroupManager(bot)
+        return await mgr.unban_user(chat_id=str(chat_id), user_id=str(user_id))
+
+    async def _set_permissions(self, chat_id: str, user_id: str, **kwargs: Any):
+        from .group_manager import GroupManager
+
+        bot = await self._get_bot()
+        mgr = GroupManager(bot)
+        return await mgr.set_permissions(chat_id=str(chat_id), user_id=str(user_id), **kwargs)
+
+
+class Toolkit:
+    """Vendor plugin entry point (auto-instantiated by PluginManager)."""
+
+    def __init__(self):
+        # Transcript tools are local-first and should be safe to register even if
+        # telegram deps aren't installed (they only need duckdb).
+        try:
+            register_namespace("tlog", _TelegramLogHandler(data_dir=_changelog_dir()))
+        except Exception as exc:
+            logger.warning("busy-38-telegram: failed registering tlog: %s", exc)
+
+        # Bot API tools require python-telegram-bot. Register them only if enabled.
+        if _truthy(os.getenv("BUSY38_TELEGRAM_ENABLE_CHAT", "1")):
+            try:
+                register_namespace("tchat", _TelegramChatHandler())
+                register_namespace("tgroup", _TelegramGroupHandler())
+            except Exception as exc:
+                logger.warning("busy-38-telegram: failed registering tchat/tgroup: %s", exc)
+
+
+__all__ = ["Toolkit"]
