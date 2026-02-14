@@ -1,0 +1,11 @@
+{
+  "name": "busy-38-telegram",
+  "version": "0.1.0",
+  "description": "Busy38 Telegram integration toolkit for messaging and chat operations.",
+  "license": "GPL-3.0-only",
+  "type": "toolkit",
+  "permissions": [
+    "read:busy38_chat_logs"
+  ],
+  "toolkit_path": "toolkit"
+}

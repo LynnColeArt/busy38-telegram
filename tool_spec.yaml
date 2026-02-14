@@ -1,0 +1,388 @@
+name: busy38-telegram
+version: "0.1.0"
+license: GPL-3.0-only
+kind: busy38-vendor-toolkit
+
+summary: >
+  Telegram vendor plugin for Busy38 that enables messaging, chat operations,
+  and transcript search via the Telegram Bot API.
+
+namespaces:
+  tlog:
+    description: Telegram transcript tools backed by Busy38 chat logs.
+    actions:
+      search:
+        description: Search Telegram chat history with snippet windows.
+        parameters:
+          query:
+            type: string
+            required: true
+            description: Query string (literal unless regex=true)
+          chat_id:
+            type: string
+            required: false
+            description: Telegram chat ID (e.g., "telegram:<chat_id>")
+          max_age_hours:
+            type: integer
+            required: false
+            default: 24
+            description: Only include messages newer than this age
+          max_messages:
+            type: integer
+            required: false
+            default: 5000
+            description: Max rows to scan
+          context:
+            type: integer
+            required: false
+            default: 80
+            description: Snippet context size in characters
+          case_sensitive:
+            type: boolean
+            required: false
+            default: false
+          regex:
+            type: boolean
+            required: false
+            default: false
+        returns:
+          type: object
+          properties:
+            success: { type: boolean }
+            results:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: string }
+                  timestamp: { type: string }
+                  chat_id: { type: string }
+                  content: { type: string }
+                  author: { type: string }
+      around:
+        description: Get context around a specific message.
+        parameters:
+          message_id:
+            type: string
+            required: true
+            description: Telegram message ID
+          chat_id:
+            type: string
+            required: true
+            description: Telegram chat ID
+          before:
+            type: integer
+            required: false
+            default: 8
+            description: Messages before target
+          after:
+            type: integer
+            required: false
+            default: 8
+            description: Messages after target
+        returns:
+          type: object
+          properties:
+            success: { type: boolean }
+            messages:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: string }
+                  timestamp: { type: string }
+                  content: { type: string }
+                  author: { type: string }
+
+  tchat:
+    description: Telegram chat messaging and operations.
+    actions:
+      send:
+        description: Send a message to a Telegram chat.
+        parameters:
+          chat_id:
+            type: string
+            required: true
+            description: Telegram chat ID (numeric) or @channelusername
+          text:
+            type: string
+            required: true
+            description: Message text (supports Markdown)
+          reply_to:
+            type: string
+            required: false
+            description: Message ID to reply to
+          silent:
+            type: boolean
+            required: false
+            default: false
+            description: Send silently (no notification)
+        returns:
+          type: object
+          properties:
+            success: { type: boolean }
+            message_id: { type: string }
+            timestamp: { type: string }
+
+      read:
+        description: Read recent messages from a chat.
+        parameters:
+          chat_id:
+            type: string
+            required: true
+            description: Telegram chat ID
+          limit:
+            type: integer
+            required: false
+            default: 50
+            description: Number of messages to fetch
+          since_id:
+            type: string
+            required: false
+            description: Fetch messages newer than this ID
+        returns:
+          type: object
+          properties:
+            success: { type: boolean }
+            messages:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: string }
+                  timestamp: { type: string }
+                  from: { type: string }
+                  text: { type: string }
+
+      edit:
+        description: Edit a previously sent message.
+        parameters:
+          chat_id:
+            type: string
+            required: true
+            description: Telegram chat ID
+          message_id:
+            type: string
+            required: true
+            description: Message ID to edit
+          text:
+            type: string
+            required: true
+            description: New message text
+        returns:
+          type: object
+          properties:
+            success: { type: boolean }
+
+      delete:
+        description: Delete a message from a chat.
+        parameters:
+          chat_id:
+            type: string
+            required: true
+            description: Telegram chat ID
+          message_id:
+            type: string
+            required: true
+            description: Message ID to delete
+        returns:
+          type: object
+          properties:
+            success: { type: boolean }
+
+      get_info:
+        description: Get information about a chat.
+        parameters:
+          chat_id:
+            type: string
+            required: true
+            description: Telegram chat ID or @username
+        returns:
+          type: object
+          properties:
+            success: { type: boolean }
+            chat:
+              type: object
+              properties:
+                id: { type: string }
+                title: { type: string }
+                type: { type: string }
+                member_count: { type: integer }
+
+      poll:
+        description: Send a poll to a chat.
+        parameters:
+          chat_id:
+            type: string
+            required: true
+            description: Telegram chat ID
+          question:
+            type: string
+            required: true
+            description: Poll question
+          options:
+            type: array
+            required: true
+            description: Array of option strings (2-10 options)
+          is_anonymous:
+            type: boolean
+            required: false
+            default: true
+          allows_multiple_answers:
+            type: boolean
+            required: false
+            default: false
+        returns:
+          type: object
+          properties:
+            success: { type: boolean }
+            poll_id: { type: string }
+
+      pin:
+        description: Pin a message in a chat.
+        parameters:
+          chat_id:
+            type: string
+            required: true
+            description: Telegram chat ID
+          message_id:
+            type: string
+            required: true
+            description: Message ID to pin
+          silent:
+            type: boolean
+            required: false
+            default: false
+            description: Pin without notification
+        returns:
+          type: object
+          properties:
+            success: { type: boolean }
+
+      unpin:
+        description: Unpin a message from a chat.
+        parameters:
+          chat_id:
+            type: string
+            required: true
+            description: Telegram chat ID
+          message_id:
+            type: string
+            required: false
+            description: Specific message to unpin (omit to unpin all)
+        returns:
+          type: object
+          properties:
+            success: { type: boolean }
+
+      get_members:
+        description: Get chat members (for admins).
+        parameters:
+          chat_id:
+            type: string
+            required: true
+            description: Telegram chat ID
+          limit:
+            type: integer
+            required: false
+            default: 100
+        returns:
+          type: object
+          properties:
+            success: { type: boolean }
+            members:
+              type: array
+              items:
+                type: object
+                properties:
+                  user_id: { type: string }
+                  username: { type: string }
+                  first_name: { type: string }
+                  status: { type: string }
+
+  tgroup:
+    description: Telegram group/channel management.
+    actions:
+      invite:
+        description: Invite a user to a group/channel.
+        parameters:
+          chat_id:
+            type: string
+            required: true
+            description: Telegram chat ID
+          user_id:
+            type: string
+            required: true
+            description: User ID to invite
+        returns:
+          type: object
+          properties:
+            success: { type: boolean }
+
+      ban:
+        description: Ban a user from a group/channel.
+        parameters:
+          chat_id:
+            type: string
+            required: true
+            description: Telegram chat ID
+          user_id:
+            type: string
+            required: true
+            description: User ID to ban
+          until_date:
+            type: integer
+            required: false
+            description: Unix timestamp when ban expires
+          revoke_messages:
+            type: boolean
+            required: false
+            default: false
+        returns:
+          type: object
+          properties:
+            success: { type: boolean }
+
+      unban:
+        description: Unban a user from a group/channel.
+        parameters:
+          chat_id:
+            type: string
+            required: true
+            description: Telegram chat ID
+          user_id:
+            type: string
+            required: true
+            description: User ID to unban
+        returns:
+          type: object
+          properties:
+            success: { type: boolean }
+
+      set_permissions:
+        description: Set user permissions in a group/channel.
+        parameters:
+          chat_id:
+            type: string
+            required: true
+            description: Telegram chat ID
+          user_id:
+            type: string
+            required: true
+            description: User ID
+          can_send_messages:
+            type: boolean
+            required: false
+          can_send_media:
+            type: boolean
+            required: false
+          can_send_polls:
+            type: boolean
+            required: false
+          can_invite_users:
+            type: boolean
+            required: false
+        returns:
+          type: object
+          properties:
+            success: { type: boolean }
