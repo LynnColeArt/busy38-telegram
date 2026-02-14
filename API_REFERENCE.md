@@ -8,7 +8,7 @@ Implementation path: `toolkit/telegram_bot.py`
 
 Key behavior:
 - Ingests all channel traffic and decides when to respond.
-- Supports subscribe controls for chats (in-memory in current runtime).
+- Supports subscribe controls for chats (persisted to local JSON by default).
 - Applies 24h recency bias by default for context/search.
 - Supports silent acknowledgements via emoji reactions.
 - Uses anti-spam guardrails for high-traffic channels.
@@ -16,9 +16,12 @@ Key behavior:
 
 Core env controls:
 - `TELEGRAM_CONTEXT_MAX_AGE_SEC` (default `86400`)
+- `TELEGRAM_STATE_PATH` (default `./data/telegram_state.json`)
+- `TELEGRAM_SUBSCRIBE_REQUIRE_ADMIN` (default `1`)
 - `TELEGRAM_FOLLOW_SPAM_WINDOW_SEC` (default `30`)
 - `TELEGRAM_FOLLOW_SPAM_MAX_EVENTS` (default `12`)
 - `TELEGRAM_FOLLOW_SPAM_COOLDOWN_SEC` (default `45`)
+- `TELEGRAM_ATTACHMENT_INCLUDE_META` (default `1`)
 
 ## Namespace: `tlog`
 
@@ -35,12 +38,14 @@ Example:
 
 Parameters:
 - `query` (string, required): literal unless `regex=true`
-- `chat_id` (string, optional): Telegram chat ID (omit to search all telegram logs)
+- `chat_id` (string, optional): Telegram chat id (raw, e.g. `-100123...`; omit to search all telegram logs)
+- `project_id` (string, optional): Busy38 project id for Telegram logs (`telegram:<chat_id>`). Overrides `chat_id` if provided.
 - `max_age_hours` (int, default 24): 0 disables age filter
 - `max_messages` (int, default 5000): max messages scanned
 - `context` (int, default 80): context window in characters
 - `case_sensitive` (bool, default false)
 - `regex` (bool, default false)
+- `snippets_per_message` (int, default 2): max snippets extracted per matching message
 - `max_results` (int, default 20)
 
 Returns:
@@ -61,8 +66,8 @@ Example:
 ```
 
 Parameters:
-- `chat_id` (string, required)
-- `message_id` (string, required)
+- `message_id` (string, required): either a raw Telegram message id (unique per chat) or fully-qualified `telegram:<chat_id>:<message_id>`
+- `chat_id` (string, required if `message_id` is not fully-qualified): raw Telegram chat id
 - `before` (int, default 8)
 - `after` (int, default 8)
 

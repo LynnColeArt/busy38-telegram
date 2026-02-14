@@ -21,7 +21,13 @@ namespaces:
           chat_id:
             type: string
             required: false
-            description: Telegram chat ID (e.g., "telegram:<chat_id>")
+            description: Telegram chat id (raw, e.g. "-100123..."); omit to search all Telegram logs.
+          project_id:
+            type: string
+            required: false
+            description: >
+              Optional Busy38 project id for Telegram logs: "telegram:<chat_id>".
+              If set, overrides chat_id.
           max_age_hours:
             type: integer
             required: false
@@ -45,6 +51,16 @@ namespaces:
             type: boolean
             required: false
             default: false
+          snippets_per_message:
+            type: integer
+            required: false
+            default: 2
+            description: Max snippets extracted per matching message
+          max_results:
+            type: integer
+            required: false
+            default: 20
+            description: Max matching messages returned
         returns:
           type: object
           properties:
@@ -70,8 +86,8 @@ namespaces:
             description: Telegram message ID (or fully-qualified telegram:<chat_id>:<message_id>)
           chat_id:
             type: string
-            required: true
-            description: Telegram chat ID
+            required: false
+            description: Required if message_id is not fully-qualified; raw Telegram chat id (e.g. "-100123...").
           before:
             type: integer
             required: false
@@ -111,6 +127,10 @@ namespaces:
             type: string
             required: true
             description: Message text (supports Markdown)
+          parse_mode:
+            type: string
+            required: false
+            description: Optional parse mode (e.g. Markdown, HTML)
           reply_to:
             type: string
             required: false

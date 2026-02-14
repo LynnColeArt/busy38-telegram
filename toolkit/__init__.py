@@ -59,6 +59,7 @@ class _TelegramLogHandler:
         self,
         query: str,
         chat_id: Optional[str] = None,
+        project_id: Optional[str] = None,
         max_age_hours: int = 24,
         max_messages: int = 5000,
         context: int = 80,
@@ -72,10 +73,14 @@ class _TelegramLogHandler:
         if max_age_hours and int(max_age_hours) > 0:
             since = datetime.now(timezone.utc) - timedelta(hours=int(max_age_hours))
 
-        project_id = f"telegram:{chat_id}" if chat_id else None
+        pid = (project_id or "").strip() or None
+        if pid is None and chat_id:
+            # chat_id is the raw Telegram chat id. Busy38 project ids for this plugin
+            # are always `telegram:<chat_id>`.
+            pid = f"telegram:{chat_id}"
         results = self._logger.search(
             query=str(query or ""),
-            project_id=project_id,
+            project_id=pid,
             since=since,
             max_messages=int(max_messages),
             context=int(context),
