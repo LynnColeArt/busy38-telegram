@@ -64,6 +64,8 @@ class Busy38TelegramBot:
         self.recent_events: list[datetime] = []
         self._running = False
         self._transcript = None
+        self._sess_store = None
+        self._sess_cache: Dict[str, str] = {}
         
         logger.info("Busy38TelegramBot initialized")
 
@@ -85,6 +87,26 @@ class Busy38TelegramBot:
             logger.warning("TelegramTranscriptLogger unavailable: %s", exc)
             self._transcript = None
         return self._transcript
+
+    def _session_store(self):
+        """
+        Best-effort Busy38 session event store (sess:*).
+
+        This plugin repo can run standalone, so we import lazily and no-op if
+        Busy core isn't present.
+        """
+        if self._sess_store is not None:
+            return self._sess_store
+        if os.getenv("TELEGRAM_SESSION_LOG_ENABLE", "1").strip().lower() in ("0", "false", "no", "off"):
+            self._sess_store = None
+            return None
+        try:
+            from core.session import SessionStore  # type: ignore
+
+            self._sess_store = SessionStore()
+        except Exception:
+            self._sess_store = None
+        return self._sess_store
     
     async def initialize(self) -> bool:
         """
@@ -226,6 +248,42 @@ class Busy38TelegramBot:
                 )
         except Exception as e:
             logger.debug(f"Transcript log failed: {e}")
+
+        # Persist to Busy38 session event stream (best-effort, when vendored into Busy).
+        try:
+            st = self._session_store()
+            if st is not None:
+                surface_id = f"telegram:{chat_id}"
+                sid = self._sess_cache.get(surface_id) or st.get_bound_session(surface_id=surface_id)
+                if not sid and os.getenv("TELEGRAM_SESSION_AUTO_BIND", "1").strip().lower() not in ("0", "false", "no", "off"):
+                    sid = st.create_session(
+                        title=f"Telegram {chat_id}",
+                        workspace_root="",
+                        writer_id=f"telegram:{os.getpid()}",
+                        metadata={"transport": "telegram", "surface_id": surface_id, "chat_id": chat_id},
+                    )
+                    st.bind_surface(surface_id=surface_id, session_id=sid)
+                if sid:
+                    self._sess_cache[surface_id] = sid
+                    st.append_event(
+                        session_id=sid,
+                        writer_id=f"telegram:{os.getpid()}",
+                        type="chat.message",
+                        payload={
+                            "transport": "telegram",
+                            "surface_id": surface_id,
+                            "role": "user",
+                            "text": message.text or "",
+                            "metadata": {
+                                "chat_id": chat_id,
+                                "message_id": str(message.message_id),
+                                "author_id": str(message.from_user.id) if message.from_user else None,
+                                "author_username": getattr(message.from_user, "username", None) if message.from_user else None,
+                            },
+                        },
+                    )
+        except Exception:
+            pass
         
         logger.debug(f"Processing message {msg_data['id']} from chat {chat_id}")
         
