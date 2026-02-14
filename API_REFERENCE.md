@@ -1,0 +1,201 @@
+# busy38-telegram API Reference
+
+This plugin exposes Busy38 Telegram runtime behavior plus agent-facing cheatcodes.
+
+## Runtime: `Busy38TelegramBot`
+
+Implementation path: `toolkit/telegram_bot.py`
+
+Key behavior:
+- Ingests all channel traffic and decides when to respond.
+- Supports subscribe/follow controls for channels.
+- Applies 24h recency bias by default for context/search.
+- Supports silent acknowledgements via emoji reactions.
+- Uses anti-spam guardrails for high-traffic channels.
+- Implements **Cognitive Desktop** pattern: think by default, speak explicitly.
+
+Core env controls:
+- `TELEGRAM_CONTEXT_MAX_AGE_SEC` (default `86400`)
+- `TELEGRAM_FOLLOW_SPAM_WINDOW_SEC` (default `30`)
+- `TELEGRAM_FOLLOW_SPAM_MAX_EVENTS` (default `12`)
+- `TELEGRAM_FOLLOW_SPAM_COOLDOWN_SEC` (default `45`)
+
+## Namespace: `tlog`
+
+Transcript tools backed by local message cache and Busy38's chat entries.
+
+### `tlog:search`
+
+Broad search with snippet windows around matches. Defaults to recency (last 24h).
+
+Example:
+```text
+[tlog:search query="deploy failed" chat_id="-1001234567890" max_age_hours=24 /]
+```
+
+Parameters:
+- `query` (string, required): literal unless `regex=true`
+- `chat_id` (string, required): Telegram chat ID
+- `max_age_hours` (int, default 24): 0 disables age filter
+- `max_messages` (int, default 5000): max messages scanned
+- `context` (int, default 80): context window in characters
+- `case_sensitive` (bool, default false)
+- `regex` (bool, default false)
+- `max_results` (int, default 20)
+
+Returns:
+- `{success: true, results: [...]}` where each result includes:
+  - `id`: `telegram:<message_id>`
+  - `timestamp`
+  - `chat_id`
+  - `snippets`: list of context strings
+  - `metadata`: author info, match positions
+
+### `tlog:around`
+
+Fetches surrounding messages for context.
+
+Example:
+```text
+[tlog:around chat_id="-1001234567890" message_id="12345" before=8 after=8 /]
+```
+
+Parameters:
+- `chat_id` (string, required)
+- `message_id` (string, required)
+- `before` (int, default 8)
+- `after` (int, default 8)
+
+Returns:
+- `{success: true, messages: [...]}` with context messages
+
+## Namespace: `tchat`
+
+Chat messaging operations via Telegram Bot API.
+
+### `tchat:send`
+
+Send a message to a chat:
+```text
+[tchat:send chat_id="-1001234567890" text="Hello team!" /]
+```
+
+Parameters:
+- `chat_id` (string, required): Chat ID or @channelusername
+- `text` (string, required): Message text (Markdown supported)
+- `reply_to` (string, optional): Message ID to reply to
+- `parse_mode` (string, optional): 'Markdown', 'HTML', or null
+- `silent` (bool, default false): Send without notification
+
+### `tchat:edit`
+
+Edit a previously sent message:
+```text
+[tchat:edit chat_id="-1001234567890" message_id="123" text="Updated text" /]
+```
+
+### `tchat:delete`
+
+Delete a message:
+```text
+[tchat:delete chat_id="-1001234567890" message_id="123" /]
+```
+
+### `tchat:poll`
+
+Create a poll:
+```text
+[tchat:poll chat_id="-1001234567890" question="Lunch?" options="["Pizza", "Sushi"]" /]
+```
+
+### `tchat:pin`
+
+Pin a message:
+```text
+[tchat:pin chat_id="-1001234567890" message_id="123" /]
+```
+
+### `tchat:unpin`
+
+Unpin a message (or all messages):
+```text
+[tchat:unpin chat_id="-1001234567890" message_id="123" /]
+[tchat:unpin chat_id="-1001234567890" /]  # Unpin all
+```
+
+### `tchat:get_info`
+
+Get chat information:
+```text
+[tchat:get_info chat_id="-1001234567890" /]
+```
+
+### `tchat:get_members`
+
+Get chat members (requires admin rights):
+```text
+[tchat:get_members chat_id="-1001234567890" limit=100 /]
+```
+
+## Namespace: `tgroup`
+
+Group and channel management operations. Requires admin privileges.
+
+### `tgroup:invite`
+
+Invite a user to a group:
+```text
+[tgroup:invite chat_id="-1001234567890" user_id="123456789" /]
+```
+
+### `tgroup:ban`
+
+Ban a user:
+```text
+[tgroup:ban chat_id="-1001234567890" user_id="123456789" /]
+[tgroup:ban chat_id="-1001234567890" user_id="123456789" until_date=1700000000 /]  # Temporary
+```
+
+### `tgroup:unban`
+
+Unban a user:
+```text
+[tgroup:unban chat_id="-1001234567890" user_id="123456789" /]
+```
+
+### `tgroup:set_permissions`
+
+Set user permissions:
+```text
+[tgroup:set_permissions 
+  chat_id="-1001234567890" 
+  user_id="123456789"
+  can_send_messages=false
+  can_send_media=false
+/]
+```
+
+## Security Notes
+
+- `tlog:*` reads local message cache; does not fetch from Telegram API for search
+- `tchat:*` and `tgroup:*` use Telegram Bot API and require appropriate bot permissions
+- Bot must be admin to use `tgroup:*` operations
+- Cognitive Desktop pattern ensures agent thinks before speaking
+
+## Cognitive Desktop Pattern
+
+This plugin implements the Cognitive Desktop principle:
+
+1. **THINK** (default): All messages are processed internally
+   - Logged to chat_entries
+   - Analyzed for intent
+   - Context updated
+   - No external output
+
+2. **SPEAK** (explicit): Only respond when triggered
+   - Direct commands (/command)
+   - Replies to bot messages
+   - Explicit @mentions
+   - Wake words (busy38:, squidder:)
+
+This separation ensures the agent processes all information but only communicates intentionally.
