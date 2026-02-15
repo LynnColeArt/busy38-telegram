@@ -31,6 +31,7 @@ Before submitting generated changes, verify:
 - New behavior has tests/integration checks and explicit error handling.
 - Critical flows are covered for regressions in permissions, moderation, and relay paths.
 - Failure states are telemetry and should remain visible; do not introduce graceful-fallback behavior that hides runtime failures.
+- Do not merge substantial architectural changes without a tracked issue number or an associated public forum thread.
 - All relevant tests pass before merge.
 
 ## Structure
