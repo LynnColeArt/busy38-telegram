@@ -48,6 +48,43 @@ def _schedule_coro(coro) -> None:
         return
 
 
+def _status_activity_for_mission(event: str, payload: Dict[str, Any]) -> Optional[str]:
+    if event == "mission.started":
+        objective = str(payload.get("objective") or "").strip()
+        return f"starting mission: {objective}" if objective else "starting mission"
+    if event == "mission.step.started":
+        step = payload.get("step")
+        return f"working on step {step}" if step else "working on a mission step"
+    if event == "mission.awaiting_orchestrator":
+        step = payload.get("step")
+        return f"waiting for guidance for step {step}" if step else "waiting for orchestrator guidance"
+    if event == "mission.orchestrator_guidance":
+        return "got guidance, continuing execution"
+    if event == "mission.step.completed":
+        step = payload.get("step")
+        return f"completed step {step}" if step else "completed mission step"
+    if event == "mission.qa.started":
+        return "starting quality check"
+    if event == "mission.qa.review":
+        attempt = payload.get("attempt")
+        state = "passed" if payload.get("approved") else "checking fixes"
+        return f"QA review #{attempt} {state}" if attempt else f"QA review {state}"
+    if event == "mission.qa.revision_required":
+        return "applying revision requested by QA"
+    if event == "mission.qa.revision_started":
+        step = payload.get("step")
+        return f"working on revision step {step}" if step else "working on revision"
+    if event == "mission.qa.revision_completed":
+        return "revision complete"
+    if event == "mission.approved":
+        return "mission complete"
+    if event == "mission.failed":
+        return "mission failed"
+    if event == "mission.cancel_requested":
+        return "mission cancelled"
+    return None
+
+
 def _status_activity_for_cheatcode(namespace: str, action: str, attributes: Dict[str, Any]) -> Optional[str]:
     ns = str(namespace or "").strip().lower()
     act = str(action or "").strip().lower()
@@ -140,12 +177,37 @@ def _maybe_register_status_hooks() -> None:
     _status_hook_registered = True
 
     try:
-        from core.hooks import on_pre_cheatcode_execute, on_post_agent_execute
+        from core.hooks import on_orchestration_status, on_pre_cheatcode_execute, on_post_agent_execute
     except Exception:
-        logger.debug("Cheatcode hooks unavailable; skipping telegram status hook registration")
+        logger.debug("Status hooks unavailable; skipping telegram status hook registration")
         return
 
     from .telegram_runtime import get_controller, get_active_context
+
+    @on_orchestration_status(priority=35)
+    def _telegram_status_on_mission(run, event: str, payload: Dict[str, Any], context=None):
+        ctrl = get_controller()
+        if ctrl is None:
+            return
+        ctx = get_active_context() or {}
+        chat_id = ctx.get("chat_id")
+        if not chat_id:
+            return
+
+        activity = _status_activity_for_mission(event, payload or {})
+        if not activity:
+            return
+
+        terminal_events = {
+            "mission.approved",
+            "mission.failed",
+            "mission.cancel_requested",
+        }
+        if event in terminal_events:
+            _schedule_coro(ctrl.clear_status(chat_id=str(chat_id)))
+            return
+
+        _schedule_coro(ctrl.post_status(chat_id=str(chat_id), activity=activity))
 
     @on_pre_cheatcode_execute(priority=40)
     def _telegram_status_on_cheatcode(namespace: str, action: str, attributes: Dict[str, Any], context=None):
