@@ -30,6 +30,7 @@ Before submitting generated changes, verify:
 - Mocked/stubbed logic is used only in tests.
 - New behavior has tests/integration checks and explicit error handling.
 - Critical flows are covered for regressions in permissions, moderation, and relay paths.
+- Failure states are telemetry and should remain visible; do not introduce graceful-fallback behavior that hides runtime failures.
 - All relevant tests pass before merge.
 
 ## Structure
