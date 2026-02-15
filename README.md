@@ -12,6 +12,8 @@ This plugin mirrors the Discord integration functionality for Telegram, enabling
 - Moderator context reset via `/clear` (summary + pin)
 - Optional Busy hook-driven status narration while tools run
 
+Roadmap note: full internal rebrand Phase 2 is deferred until after closed-beta hardening is complete.
+
 ## Structure
 
 ```
