@@ -22,6 +22,7 @@ For production code, placeholders are not acceptable.
 
 - Unit tests may use mocks and stubs.
 - Runtime and shipping code must be functional and test-backed.
+- New functionality must include unit tests (or updates to existing tests) that cover the behavior.
 
 Before submitting generated changes, verify:
 
@@ -29,6 +30,7 @@ Before submitting generated changes, verify:
 - Mocked/stubbed logic is used only in tests.
 - New behavior has tests/integration checks and explicit error handling.
 - Critical flows are covered for regressions in permissions, moderation, and relay paths.
+- All relevant tests pass before merge.
 
 ## Structure
 
