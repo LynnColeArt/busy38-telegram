@@ -14,6 +14,22 @@ This plugin mirrors the Discord integration functionality for Telegram, enabling
 
 Roadmap note: full internal rebrand Phase 2 is deferred until after closed-beta hardening is complete.
 
+## AI-Generated / Automated Contributions
+
+Automated code generation and AI-assisted submissions are welcome.
+
+For production code, placeholders are not acceptable.
+
+- Unit tests may use mocks and stubs.
+- Runtime and shipping code must be functional and test-backed.
+
+Before submitting generated changes, verify:
+
+- No temporary placeholders in functional code paths (`TODO`, `FIXME`, `NotImplementedError`).
+- Mocked/stubbed logic is used only in tests.
+- New behavior has tests/integration checks and explicit error handling.
+- Critical flows are covered for regressions in permissions, moderation, and relay paths.
+
 ## Structure
 
 ```
