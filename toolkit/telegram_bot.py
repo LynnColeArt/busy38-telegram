@@ -14,8 +14,10 @@ Handles:
 import os
 import logging
 import asyncio
+import random
 import time
 import json
+import re
 from pathlib import Path
 from collections import defaultdict, deque
 from typing import Optional, Dict, Any, Callable
@@ -42,6 +44,18 @@ class Busy38TelegramBot:
     Ingests all channel traffic and decides when to respond.
     Supports subscribe controls for chats (persisted to local JSON by default).
     """
+
+    _KNOWN_ROUTE_ALIAS_MAP = {
+        "main": "main",
+        "orchestrator": "main",
+        "nora": "nora",
+        "alex": "alex",
+        "captain": "nora",
+        "captainhook": "nora",
+    }
+    _KNOWN_ROUTE_TARGETS = ("main", "nora", "alex")
+    _HEY_ROUTE_RE = re.compile(r"(?i)^\\s*hey\\s+([a-z][a-z0-9._-]{0,31})(?:\\s*[:,;\\-]?\\s+|\\s+$)(.*)$")
+    _AT_ROUTE_RE = re.compile(r"(?i)^\\s*@([a-z][a-z0-9._-]{0,31})(?:\\s*[:,;\\-]?\\s+|\\s+$)(.*)$")
     
     def __init__(self, token: Optional[str] = None, orchestrator: Any = None):
         """
@@ -79,6 +93,8 @@ class Busy38TelegramBot:
         self.context_max_age_sec = int(os.getenv('TELEGRAM_CONTEXT_MAX_AGE_SEC', '86400'))
         self.no_response_reactions = os.getenv('TELEGRAM_NO_RESPONSE_REACTIONS', 'true').lower() == 'true'
         self.no_response_emojis = os.getenv('TELEGRAM_NO_RESPONSE_EMOJIS', '👍,👀,✅').split(',')
+        self._no_response_reaction_palette = [e.strip() for e in self.no_response_emojis if str(e).strip()]
+        self._rng = random.Random()
         self.follow_spam_window_sec = int(os.getenv('TELEGRAM_FOLLOW_SPAM_WINDOW_SEC', '30'))
         self.follow_spam_max_events = int(os.getenv('TELEGRAM_FOLLOW_SPAM_MAX_EVENTS', '12'))
         self.follow_spam_cooldown_sec = int(os.getenv('TELEGRAM_FOLLOW_SPAM_COOLDOWN_SEC', '45'))
@@ -112,6 +128,13 @@ class Busy38TelegramBot:
             "no",
             "off",
         )
+        self._status_events_enable = os.getenv("TELEGRAM_STATUS_EVENT_FEEDBACK", "1").strip().lower() not in (
+            "",
+            "0",
+            "false",
+            "no",
+            "off",
+        )
         self._status_msg_id_by_chat: Dict[str, int] = {}
         self._status_last_update_unix: Dict[str, float] = {}
         self._bot_me: Any = None
@@ -123,6 +146,10 @@ class Busy38TelegramBot:
         self._follow_recent_events: Dict[str, deque[float]] = defaultdict(deque)
         self._follow_cooldown_until: Dict[str, float] = {}
         self._running = False
+        self._chat_locks: Dict[str, asyncio.Lock] = {}
+        self._last_invoke_unix: Dict[str, float] = {}
+        self._last_target_by_chat: Dict[str, str] = {}
+        self._min_invoke_interval = float(os.getenv("TELEGRAM_MIN_INVOKE_INTERVAL_SEC", "6.0"))
         self._transcript = None
         self._sess_store = None
         self._sess_cache: Dict[str, str] = {}
@@ -183,6 +210,106 @@ class Busy38TelegramBot:
         except Exception as exc:
             logger.debug("Failed to save telegram state (%s): %s", self.state_path, exc)
 
+    @staticmethod
+    def _normalize_route_alias(raw: Optional[str]) -> str:
+        if not raw:
+            return ""
+        return re.sub(r"[^a-z0-9._-]", "", str(raw).lower().strip())
+
+    @classmethod
+    def _known_route_targets(cls) -> list[str]:
+        return list(cls._KNOWN_ROUTE_TARGETS)
+
+    @classmethod
+    def _parse_explicit_route(cls, content: str) -> tuple[Optional[str], str]:
+        raw = (content or "").strip()
+        if not raw:
+            return None, raw
+        m = cls._HEY_ROUTE_RE.match(raw)
+        if m:
+            alias = (m.group(1) or "").strip()
+            message = (m.group(2) or "").strip()
+            return alias, message
+        m = cls._AT_ROUTE_RE.match(raw)
+        if m:
+            alias = (m.group(1) or "").strip()
+            message = (m.group(2) or "").strip()
+            return alias, message
+        return None, raw
+
+    @classmethod
+    def _resolve_explicit_route_target(cls, raw_alias: Optional[str]) -> tuple[Optional[str], bool]:
+        alias = cls._normalize_route_alias(raw_alias)
+        if not alias:
+            return None, False
+        mapped = cls._KNOWN_ROUTE_ALIAS_MAP.get(alias)
+        if mapped:
+            return mapped, True
+        return None, False
+
+    @staticmethod
+    def _format_routing_context(
+        *,
+        routing_mode: str,
+        route_source: str,
+        target_agent_id: Optional[str],
+        recipients: Optional[list[str]] = None,
+        known_agents: Optional[list[str]] = None,
+    ) -> str:
+        lines = [
+            "Routing context:",
+            f"- mode: {routing_mode}",
+            f"- route_source: {route_source}",
+        ]
+        if target_agent_id:
+            lines.append(f"- explicit_target: {target_agent_id}")
+        if recipients:
+            lines.append("- recipients: " + ",".join(recipients))
+        if known_agents:
+            lines.append("- known_agents: " + ",".join(known_agents))
+        if routing_mode == "direct" and not target_agent_id:
+            lines.append("- explicit_target_missing: true")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_no_response_directives(result: Optional[str]) -> tuple[bool, Optional[str]]:
+        text = (result or "").strip()
+        if not text:
+            return False, None
+        text_l = text.lower()
+        is_silent = text_l == "[no response required]" or "[no-response /]" in text_l
+        m = re.search(r"\\[\\s*react\\s*:\\s*([^\\]\\s]+)\\s*\\]", text, flags=re.IGNORECASE)
+        reaction = m.group(1).strip() if m else None
+        return is_silent, reaction
+
+    @classmethod
+    def _should_invoke_agent(
+        cls,
+        *,
+        chat_id: str,
+        is_private: bool,
+        is_mentioned: bool,
+        is_reply_to_me: bool,
+        is_command: bool,
+        explicit_route: Optional[str] = None,
+        content: str = "",
+        follow_mode: bool = False,
+        follow_allows: bool = True,
+        last_invoke_unix: float = 0.0,
+        min_invoke_interval: float = 0.0,
+    ) -> bool:
+        content_l = (content or "").strip().lower()
+        wakeword = content_l.startswith("busy38:") or content_l.startswith("squidder:")
+        if explicit_route:
+            return True
+        if is_private:
+            return True
+        if is_mentioned or is_reply_to_me or is_command or wakeword:
+            return True
+        if follow_mode and follow_allows:
+            return (time.time() - float(last_invoke_unix)) >= float(min_invoke_interval)
+        return False
+
     def _transcript_logger(self):
         """
         Lazy init transcript logger (DuckDB chat_entries).
@@ -221,6 +348,106 @@ class Busy38TelegramBot:
         except Exception:
             self._sess_store = None
         return self._sess_store
+
+    def _lock_for_chat(self, chat_id: str) -> asyncio.Lock:
+        lock = self._chat_locks.get(chat_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._chat_locks[chat_id] = lock
+        return lock
+
+    async def _build_context_messages(self, *, chat_id: str, system_prompt: str, user_task: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        try:
+            tl = self._transcript_logger()
+            if tl is not None:
+                project_id = f"telegram:{chat_id}"
+                rows = tl.recent_messages(
+                    project_id=project_id,
+                    max_age_hours=max(1, int(self.context_max_age_sec // 3600)),
+                    limit=40,
+                )
+        except Exception:
+            rows = []
+
+        history_lines = []
+        for rec in rows[-min(len(rows), 40):]:
+            meta = rec.get("metadata") or {}
+            who = meta.get("author_username") or rec.get("author") or meta.get("author_id") or "unknown"
+            content = str(rec.get("content") or "").replace("\n", " ").strip()
+            if len(content) > 280:
+                content = content[:280] + "..."
+            history_lines.append(f"{who}: {content}")
+        history_block = "\n".join(history_lines) if history_lines else "(no recent history available)"
+        return [
+            {"role": "system", "content": system_prompt + "\nRecent chat history:\n" + history_block},
+            {"role": "user", "content": user_task},
+        ]
+
+    async def _invoke_agent_for_message(
+        self,
+        *,
+        chat_id: str,
+        author_name: str,
+        content: str,
+        route_mode: str,
+        route_target: Optional[str],
+        is_mentioned_or_reply: bool,
+        route_source: str = "telegram",
+        is_command: bool = False,
+    ) -> Optional[str]:
+        if not self.orchestrator:
+            return None
+
+        system_prompt = (
+            "You are Busy38 running as a Telegram bot.\n\n"
+            "Use concise, practical responses and emit [no-response /] when no reply is needed.\n"
+            f"Known routing targets: {', '.join(self._known_route_targets())}\n\n"
+            "Routing contract:\n"
+            "- If explicitly addressed with a known target, act as that target.\n"
+            "- If following a prior target and no explicit name is provided, preserve that target.\n"
+            "- If explicit target is unknown, ask for clarification.\n"
+        )
+
+        trigger = "command" if is_command else ("mention" if is_mentioned_or_reply else "follow")
+        routing_context = self._format_routing_context(
+            routing_mode=route_mode,
+            route_source=route_source,
+            target_agent_id=route_target,
+            recipients=[route_target] if route_target else None,
+            known_agents=self._known_route_targets(),
+        )
+        user_task = (
+            f"{routing_context}\n"
+            f"Trigger: {trigger}\n"
+            f"New message from {author_name}:\n"
+            f"{content}\n\n"
+            "Respond as Busy38 in this Telegram chat, or output [no-response /] if you should stay silent."
+        )
+
+        async def _orchestration_status_update(context: Dict[str, Any], event: str, payload: Dict[str, Any]) -> None:
+            if not str(event).startswith("tool."):
+                return
+            await self._post_tool_status(chat_id=chat_id, event=event, payload=payload)
+
+        ctx_messages = await self._build_context_messages(chat_id=chat_id, system_prompt=system_prompt, user_task=user_task)
+        try:
+            if hasattr(self.orchestrator, "_run_loop"):
+                return await self.orchestrator._run_loop(
+                    task=user_task,
+                    context=ctx_messages,
+                    allow_delegation_tags=False,
+                    owner_label="telegram_bridge",
+                    max_iterations=10,
+                    status_callback=_orchestration_status_update,
+                )
+            return await self.orchestrator.run_agent_loop(
+                task=user_task,
+                context=ctx_messages,
+                status_callback=_orchestration_status_update,
+            )
+        except Exception:
+            return None
     
     async def initialize(self) -> bool:
         """
@@ -444,6 +671,46 @@ class Busy38TelegramBot:
             return f"{a}..."
         return f"is {a}..."
 
+    @staticmethod
+    def _format_tool_status_line(event: str, payload: Dict[str, Any]) -> str:
+        e = str(event or "").strip().lower()
+        meta = payload.get("metadata")
+        if not isinstance(meta, dict):
+            meta = {}
+        owner = str(payload.get("owner") or meta.get("owner") or "agent")
+        tool = str(payload.get("tool_text") or payload.get("tool") or meta.get("tool") or "").strip()
+        tool_name = tool or "tool request"
+        reason = str(payload.get("reason") or meta.get("reason") or "").strip()
+        err = str(payload.get("error") or meta.get("error") or "").strip()
+
+        if e == "tool.requested":
+            return f"🛠️ {owner} requested tool: {tool_name}"
+        if e == "tool.started":
+            return f"🛠️ {owner} started tool: {tool_name}"
+        if e == "tool.completed":
+            return f"✅ {owner} completed tool: {tool_name}"
+        if e == "tool.failed":
+            detail = reason or err
+            if detail:
+                return f"⚠️ {owner} tool failed: {tool_name} ({detail})"
+            return f"⚠️ {owner} tool failed: {tool_name}"
+        if e == "tool.refused":
+            if reason:
+                return f"🚫 {owner} refused tool: {tool_name} ({reason})"
+            return f"🚫 {owner} refused tool: {tool_name}"
+        return ""
+
+    async def _post_tool_status(self, *, chat_id: str, event: str, payload: Dict[str, Any]) -> None:
+        if not self._status_events_enable:
+            return
+        line = self._format_tool_status_line(event, payload)
+        if not line or not self.application:
+            return
+        try:
+            await self.application.bot.send_message(chat_id=str(chat_id), text=line)
+        except Exception:
+            logger.debug("Failed to post Telegram tool status event", exc_info=True)
+
     async def post_status(self, *, chat_id: str, activity: str, force: bool = False) -> None:
         if not self._status_enable:
             return
@@ -503,6 +770,7 @@ class Busy38TelegramBot:
         
         message = update.message
         chat_id = str(message.chat_id)
+        await self._get_me()
 
         # Subscription gating: ingest only subscribed chats (matches Discord transport behavior).
         from .telegram_state import ChatKey
@@ -537,19 +805,70 @@ class Busy38TelegramBot:
         except Exception:
             bot_username = ""
 
+        is_follow_trigger = bool(cfg.subscribed and cfg.follow_mode and (not bool(message.text or "").startswith("/")))
         text = message.text or ""
         caption = message.caption or ""
         combined_text = text or caption or ""
 
-        trigger = "ingest"
-        if combined_text.startswith("/"):
+        is_private = str(getattr(message.chat, "type", "")).lower() == "private"
+        bot_id = getattr(self._bot_me, "id", None) if self._bot_me is not None else None
+        is_reply_to_me = (
+            bool(message.reply_to_message)
+            and bool(message.reply_to_message.from_user)
+            and bot_id is not None
+            and int(message.reply_to_message.from_user.id) == int(bot_id)
+        )
+        is_mentioned = (
+            bot_username and (f"@{bot_username}".lower() in combined_text.lower())
+        )
+
+        explicit_alias = None
+        route_target: Optional[str] = None
+        explicit_alias, routed_content = self._parse_explicit_route(combined_text)
+        if explicit_alias:
+            resolved_target, alias_ok = self._resolve_explicit_route_target(explicit_alias)
+            if not alias_ok:
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="I couldn't resolve that route. Try 'hey nora', 'hey alex', or 'hey main'. "
+                        "Say it as the first words of your message."
+                    )
+                except Exception:
+                    pass
+                return
+            combined_text = routed_content
+            route_target = resolved_target
+            is_mentioned = True
+        else:
+            route_target = self._last_target_by_chat.get(chat_id)
+            if not route_target:
+                route_target = None
+
+        lowered = (combined_text or "").lstrip().lower()
+        if lowered.startswith("busy38:"):
+            combined_text = combined_text.split(":", 1)[1].strip()
+            is_mentioned = True
+        elif lowered.startswith("squidder:"):
+            combined_text = combined_text.split(":", 1)[1].strip()
+            is_mentioned = True
+
+        if not combined_text and is_command is False:
+            trigger = "follow" if is_follow_trigger else "ingest"
+        elif combined_text.startswith("/"):
             trigger = "command"
-        elif message.reply_to_message and getattr(getattr(message.reply_to_message, "from_user", None), "is_bot", False):
+        elif is_reply_to_me:
             trigger = "reply"
-        elif bot_username and (f"@{bot_username}".lower() in combined_text.lower()):
+        elif is_mentioned:
             trigger = "mention"
         elif cfg.follow_mode:
             trigger = "follow"
+        else:
+            trigger = "ingest"
+
+        route_mode = "fallback" if route_target else "auto"
+        if explicit_alias:
+            route_mode = "direct"
         
         # Build message data
         msg_data = {
@@ -687,6 +1006,19 @@ class Busy38TelegramBot:
         # Send to all registered callbacks. Bind an active context so hook handlers
         # (cheatcodes) can narrate status and auto-clear can identify the chat.
         responded = False
+        should_invoke = self._should_invoke_agent(
+            chat_id=chat_id,
+            is_private=is_private,
+            is_mentioned=is_mentioned,
+            is_reply_to_me=is_reply_to_me,
+            is_command=is_command,
+            explicit_route=route_target,
+            content=combined_text,
+            follow_mode=bool(cfg.follow_mode),
+            follow_allows=not is_private and not is_command and self._follow_guardrail_allows(chat_id),
+            last_invoke_unix=self._last_invoke_unix.get(chat_id, 0.0),
+            min_invoke_interval=self._min_invoke_interval,
+        )
         try:
             from .telegram_runtime import bind_active_context
         except Exception:
@@ -711,16 +1043,92 @@ class Busy38TelegramBot:
                     cm.__exit__(None, None, None)
             except Exception:
                 pass
+
+        if should_invoke and not responded:
+            lock = self._lock_for_chat(chat_id)
+            if lock.locked() and not (is_private or is_mentioned or is_reply_to_me or is_command):
+                return
+
+            status_task = None
+            result: Optional[str] = None
+            status_started = False
+            try:
+                async with lock:
+                    self._last_invoke_unix[chat_id] = time.time()
+
+                    if self._status_enable:
+                        async def _delayed_status() -> None:
+                            await asyncio.sleep(self._status_delay_sec)
+                            await self.post_status(chat_id=chat_id, activity="thinking")
+
+                        status_task = asyncio.create_task(_delayed_status())
+                        status_started = True
+
+                    result = await self._invoke_agent_for_message(
+                        chat_id=chat_id,
+                        author_name=str(message.from_user) if message.from_user else "user",
+                        content=combined_text,
+                        route_mode=route_mode,
+                        route_target=route_target,
+                        is_mentioned_or_reply=(is_mentioned or is_reply_to_me),
+                        is_command=is_command,
+                    )
+            except Exception as e:
+                logger.error("Error invoking orchestrator from telegram: %s", e)
+            finally:
+                if status_task:
+                    status_task.cancel()
+                if self._status_enable and status_started:
+                    await self.clear_status(chat_id=chat_id)
+
+            if route_target:
+                self._last_target_by_chat[chat_id] = route_target
+
+            is_silent = False
+            requested_reaction: Optional[str] = None
+            if result is not None:
+                is_silent, requested_reaction = self._parse_no_response_directives(result)
+            else:
+                result = "⚠️ No result from orchestrator."
+
+            if is_silent:
+                responded = True
+                if self.no_response_reactions:
+                    emoji = requested_reaction or (
+                        self._rng.choice(self._no_response_reaction_palette)
+                        if self._no_response_reaction_palette else None
+                    )
+                    if emoji:
+                        try:
+                            await self._send_acknowledgment(message, context, emoji=emoji)
+                        except Exception:
+                            pass
+                # No outgoing chat response when silent.
+            else:
+                if result:
+                    await context.bot.send_message(chat_id=chat_id, text=str(result)[:4000])
+                    responded = True
         
         # Send acknowledgment if no-response mode
         if self.no_response_reactions and (not responded) and trigger != "command":
             await self._send_acknowledgment(message, context)
     
-    async def _send_acknowledgment(self, message: Message, context: ContextTypes.DEFAULT_TYPE):
+    async def _send_acknowledgment(
+        self,
+        message: Message,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        emoji: Optional[str] = None,
+    ):
         """Send a silent acknowledgment reaction (emoji)."""
         try:
-            # React with first emoji in list
-            emoji = self.no_response_emojis[0] if self.no_response_emojis else '👍'
+            emoji = (
+                emoji
+                if emoji is not None
+                else (self.no_response_emojis[0] if self.no_response_emojis else "👍")
+            )
+            if not emoji:
+                return
             # Telegram reaction support is version-dependent. Try the most direct method,
             # then fall back to bot API if available.
             try:
