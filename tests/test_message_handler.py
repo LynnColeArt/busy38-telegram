@@ -69,11 +69,34 @@ def test_normalize_message_and_type():
 
 
 def test_should_speak_rules():
-    h = MessageHandler()
+    h = MessageHandler(bot_username="Busy38")
     assert h.should_speak({"text": "/help", "is_reply": False}) is True
-    assert h.should_speak({"text": "hello @bot", "is_reply": False}) is True
+    assert h.should_speak({"text": "hello @busy38", "is_reply": False}) is True
+    assert h.should_speak({"text": "hello @other", "is_reply": False}) is False
     assert h.should_speak({"text": "hello", "is_reply": True}) is True
     assert h.should_speak({"text": "hello", "is_reply": False}) is False
+
+
+def test_should_speak_respects_entities_and_bot_username():
+    h = MessageHandler(bot_username="@busy38")
+    assert h.should_speak(
+        {
+            "text": "hey @busy38 can you help?",
+            "is_reply": False,
+            "entities": [
+                {"type": "mention", "offset": 4, "length": 8},
+            ],
+        }
+    ) is True
+    assert h.should_speak(
+        {
+            "text": "hey @other can you help?",
+            "is_reply": False,
+            "entities": [
+                {"type": "mention", "offset": 4, "length": 6},
+            ],
+        }
+    ) is False
 
 
 def test_command_and_processor_hooks():

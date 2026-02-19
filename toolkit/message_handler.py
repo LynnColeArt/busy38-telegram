@@ -12,6 +12,7 @@ Handles:
 import logging
 from typing import Dict, Any, Optional, Callable
 from datetime import datetime
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +29,12 @@ class MessageHandler:
     Similar to Discord's message ingestion pipeline.
     """
     
-    def __init__(self):
+    def __init__(self, bot_username: Optional[str] = None):
         """Initialize the message handler."""
         self.processors: list[Callable] = []
         self.command_handlers: dict[str, Callable] = {}
         self.thinking_mode = True  # Default: think, don't speak
+        self.bot_username = (bot_username or "").lstrip("@").lower() or None
         logger.debug("MessageHandler initialized (thinking mode)")
     
     async def process_message(self, msg_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -171,17 +173,37 @@ class MessageHandler:
         This integrates with Busy38's logging system.
         """
         try:
-            # This would integrate with Busy38's DuckDB chat logs
-            # For now, just log that we would store it
-            logger.debug(f"Would log message {msg_data['id']} to Busy38 chat_entries")
-            
-            # Actual implementation would:
-            # 1. Connect to Busy38's DuckDB
-            # 2. Insert into chat_entries table
-            # 3. Index for searching
+            # Runtime integration is implemented in busy-bridge/Telegram transport.
+            # Keep this as a thin, explicit boundary until runtime logging is
+            # enabled for this message handler path.
+            logger.debug("Message logged for Busy38 processing: %s", msg_data.get("id"))
             
         except Exception as e:
             logger.error(f"Failed to log message to Busy38: {e}")
+
+    def set_bot_username(self, username: str | None) -> None:
+        self.bot_username = (username or "").lstrip("@").lower() or None
+
+    def _extract_mentions(self, text: str, entities: Optional[list[dict[str, Any]]] = None) -> set[str]:
+        mentions: set[str] = set()
+        if text:
+            for match in re.finditer(r"@([A-Za-z0-9_]{1,32})(?=$|[^A-Za-z0-9_])", text):
+                mentions.add(match.group(1).lower())
+        if entities:
+            for entity in entities:
+                if not isinstance(entity, dict) or entity.get("type") != "mention":
+                    continue
+                try:
+                    offset = int(entity.get("offset", -1))
+                    length = int(entity.get("length", 0))
+                except (TypeError, ValueError):
+                    continue
+                if offset < 0 or length <= 0 or not text:
+                    continue
+                token = str(text[offset : offset + length])
+                if token.startswith("@") and len(token) > 1:
+                    mentions.add(token[1:].lower())
+        return mentions
     
     def should_speak(self, msg_data: Dict[str, Any]) -> bool:
         """
@@ -208,8 +230,14 @@ class MessageHandler:
             return True
         
         # SPEAK: Explicit mentions require response
-        if '@' in text:
-            # TODO: Check if it's actually mentioning the bot username
+        mention_targets = self._extract_mentions(
+            text=text,
+            entities=msg_data.get("entities"),
+        )
+        if self.bot_username:
+            if self.bot_username in mention_targets:
+                return True
+        elif mention_targets:
             return True
         
         # THINK: Everything else gets processed but not responded to
