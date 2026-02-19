@@ -29,13 +29,49 @@ class MessageHandler:
     Similar to Discord's message ingestion pipeline.
     """
     
-    def __init__(self, bot_username: Optional[str] = None):
+    def __init__(
+        self,
+        bot_username: Optional[str] = None,
+        transcript_logger: Optional[Any] = None,
+        data_dir: str = "./data/memory",
+    ):
         """Initialize the message handler."""
         self.processors: list[Callable] = []
         self.command_handlers: dict[str, Callable] = {}
         self.thinking_mode = True  # Default: think, don't speak
         self.bot_username = (bot_username or "").lstrip("@").lower() or None
+        self._transcript_logger = transcript_logger
+        self._transcript_data_dir = data_dir
         logger.debug("MessageHandler initialized (thinking mode)")
+
+    def _resolve_timestamp(self, value: Any) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, (int, float)):
+            try:
+                return datetime.fromtimestamp(value)
+            except (TypeError, ValueError):
+                return None
+        if isinstance(value, str):
+            normalized = value.replace("Z", "+00:00") if "Z" in value else value
+            try:
+                return datetime.fromisoformat(normalized)
+            except ValueError:
+                return None
+        return None
+
+    def _transcript_logger_instance(self) -> Optional[Any]:
+        if self._transcript_logger is not None:
+            return self._transcript_logger
+
+        try:
+            from .telegram_transcript import TelegramTranscriptLogger
+        except Exception as exc:
+            logger.debug("TelegramTranscriptLogger import failed: %s", exc)
+            return None
+
+        self._transcript_logger = TelegramTranscriptLogger(data_dir=self._transcript_data_dir)
+        return self._transcript_logger
     
     async def process_message(self, msg_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -173,10 +209,43 @@ class MessageHandler:
         This integrates with Busy38's logging system.
         """
         try:
-            # Runtime integration is implemented in busy-bridge/Telegram transport.
-            # Keep this as a thin, explicit boundary until runtime logging is
-            # enabled for this message handler path.
-            logger.debug("Message logged for Busy38 processing: %s", msg_data.get("id"))
+            logger_obj = self._transcript_logger_instance()
+            if logger_obj is None:
+                logger.debug("Skipping Busy38 transcript logging due to missing logger dependency.")
+                return
+
+            from_user = msg_data.get("from_user", {})
+            raw_ts = self._resolve_timestamp(msg_data.get("timestamp"))
+            logger_obj.log_message(
+                chat_id=str(msg_data.get("chat_id")),
+                message_id=str(msg_data.get("id")),
+                timestamp=raw_ts,
+                content=(msg_data.get("text") or ""),
+                metadata={
+                    "transport": "telegram",
+                    "message_type": msg_data.get("message_type", "unknown"),
+                    "chat_id": msg_data.get("chat_id"),
+                    "message_id": str(msg_data.get("id")),
+                    "author_id": from_user.get("id"),
+                    "author_username": from_user.get("username"),
+                    "author_first_name": from_user.get("first_name"),
+                    "author_last_name": from_user.get("last_name"),
+                    "author_is_bot": bool(from_user.get("is_bot")),
+                    "reply_to_message_id": msg_data.get("reply_to_message_id"),
+                    "is_reply": bool(msg_data.get("is_reply")),
+                },
+                participants=[
+                    int(from_user["id"])
+                    for from_user in [from_user]
+                    if from_user.get("id") is not None
+                    and str(from_user.get("id")).isdigit()
+                ],
+            )
+            logger.debug(
+                "Logged message to Busy38 transcript: chat=%s id=%s",
+                msg_data.get("chat_id"),
+                msg_data.get("id"),
+            )
             
         except Exception as e:
             logger.error(f"Failed to log message to Busy38: {e}")

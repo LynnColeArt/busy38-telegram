@@ -52,6 +52,14 @@ class _Message:
         self.entities = []
 
 
+class _FakeTranscriptLogger:
+    def __init__(self):
+        self.logged: list[dict] = []
+
+    def log_message(self, **kwargs):
+        self.logged.append(kwargs)
+
+
 def test_extract_command_parses_bot_suffix_and_args():
     h = MessageHandler()
     assert h._extract_command("/ping@bot hi") == "ping"
@@ -117,3 +125,31 @@ def test_command_and_processor_hooks():
     assert called["processor"] == 1
     assert result["commands_found"] == ["hello"]
     assert result["handlers_triggered"] == ["command:hello", "_processor"]
+
+
+def test_log_to_busy38_persists_normalized_message():
+    fake_logger = _FakeTranscriptLogger()
+    h = MessageHandler(transcript_logger=fake_logger)
+    normalized = MessageHandler().normalize_message(_Message("hello world", message_id=17))
+
+    asyncio.run(h.log_to_busy38(normalized))
+
+    assert len(fake_logger.logged) == 1
+    payload = fake_logger.logged[0]
+    assert payload["chat_id"] == "77"
+    assert payload["message_id"] == "17"
+    assert payload["content"] == "hello world"
+    assert payload["metadata"]["transport"] == "telegram"
+    assert payload["metadata"]["message_type"] == "text"
+
+
+def test_log_to_busy38_handles_bad_timestamp_gracefully():
+    fake_logger = _FakeTranscriptLogger()
+    h = MessageHandler(transcript_logger=fake_logger)
+    msg = MessageHandler().normalize_message(_Message("hello", message_id=8))
+    msg["timestamp"] = "not-a-timestamp"
+
+    asyncio.run(h.log_to_busy38(msg))
+
+    assert len(fake_logger.logged) == 1
+    assert fake_logger.logged[0]["message_id"] == "8"
