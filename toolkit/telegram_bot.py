@@ -33,6 +33,7 @@ from telegram.ext import (
     MessageHandler as TelegramMessageHandler,
     filters
 )
+from .telegram_attachments import attachment_summary_line, extract_telegram_attachments, sanitize_attachment_for_transcript
 
 logger = logging.getLogger(__name__)
 
@@ -1064,49 +1065,14 @@ class Busy38TelegramBot:
                     ts = ts.replace(tzinfo=timezone.utc)
 
                 author = message.from_user
-                attachments: list[dict[str, Any]] = []
-                if getattr(message, "photo", None):
-                    # take largest photo size
-                    try:
-                        ph = list(message.photo)[-1]
-                        attachments.append(
-                            {
-                                "type": "photo",
-                                "file_id": getattr(ph, "file_id", None),
-                                "file_unique_id": getattr(ph, "file_unique_id", None),
-                                "file_size": getattr(ph, "file_size", None),
-                                "width": getattr(ph, "width", None),
-                                "height": getattr(ph, "height", None),
-                            }
-                        )
-                    except Exception:
-                        pass
-                doc = getattr(message, "document", None)
-                if doc is not None:
-                    attachments.append(
-                        {
-                            "type": "document",
-                            "file_id": getattr(doc, "file_id", None),
-                            "file_unique_id": getattr(doc, "file_unique_id", None),
-                            "file_name": getattr(doc, "file_name", None),
-                            "mime_type": getattr(doc, "mime_type", None),
-                            "file_size": getattr(doc, "file_size", None),
-                        }
-                    )
+                attachments = extract_telegram_attachments(message)
+                safe_attachments = [sanitize_attachment_for_transcript(att) for att in attachments]
                 content = combined_text or ""
-                if attachments and os.getenv("TELEGRAM_ATTACHMENT_INCLUDE_META", "1").strip().lower() not in ("0", "false", "no", "off"):
+                if safe_attachments and os.getenv("TELEGRAM_ATTACHMENT_INCLUDE_META", "1").strip().lower() not in (
+                    "0", "false", "no", "off"
+                ):
                     # Similar to Discord: keep it stable and short.
-                    parts = []
-                    for att in attachments[:4]:
-                        name = att.get("file_name") or att.get("type") or "file"
-                        size = att.get("file_size")
-                        if isinstance(size, int):
-                            parts.append(f"{name} ({size}B)")
-                        else:
-                            parts.append(str(name))
-                    if len(attachments) > 4:
-                        parts.append(f"+{len(attachments) - 4} more")
-                    suffix = " [attachments: " + ", ".join(parts) + "]"
+                    suffix = " " + attachment_summary_line(safe_attachments, max_items=4)
                     content = (content + suffix).strip() if content else suffix.strip()
                 tl.log_message(
                     chat_id=chat_id,
@@ -1123,7 +1089,7 @@ class Busy38TelegramBot:
                         "is_bot": bool(getattr(author, "is_bot", False)) if author else False,
                         "trigger": trigger,
                         "follow_mode": bool(cfg.follow_mode),
-                        "attachments": attachments,
+                        "attachments": safe_attachments,
                     },
                     participants=[int(author.id)] if author and getattr(author, "id", None) is not None else None,
                 )
