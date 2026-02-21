@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
+import hashlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,12 +28,12 @@ sanitize_attachment_for_transcript = TelegramAttachments.sanitize_attachment_for
 
 
 class _Photo:
-    def __init__(self, *, file_id: str, size: int = 42):
+    def __init__(self, *, file_id: str, size: int = 42, width: int = 64, height: int = 64):
         self.file_id = file_id
         self.file_unique_id = f"{file_id}-uniq"
         self.file_size = size
-        self.width = 256
-        self.height = 256
+        self.width = width
+        self.height = height
 
 
 class _Document:
@@ -49,12 +51,34 @@ class _Message:
         self.document = document
 
 
+class _FakeFile:
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def download_as_bytearray(self):
+        return self._data
+
+
+class _FakeBot:
+    def __init__(self, data: bytes):
+        self._data = data
+        self.last_file_id: str | None = None
+
+    async def get_file(self, file_id):
+        self.last_file_id = str(file_id)
+        return _FakeFile(self._data)
+
+
+def _run_extract(message, **kwargs):
+    return asyncio.run(extract_telegram_attachments(message, **kwargs))
+
+
 def test_extract_telegram_attachments_accepts_photo_and_document():
     msg = _Message(
         photo=[_Photo(file_id="p1", size=333)],
         document=_Document(file_id="d1", file_name="notes.txt", mime_type="text/plain", size=256),
     )
-    attachments = extract_telegram_attachments(msg)
+    attachments = _run_extract(msg, bot=None)
     assert len(attachments) == 2
     assert attachments[0]["file_name"] == "photo.png"
     assert attachments[0]["intake_decision"] == "accept"
@@ -64,10 +88,21 @@ def test_extract_telegram_attachments_accepts_photo_and_document():
 
 def test_extract_telegram_attachments_blocks_executable_document():
     msg = _Message(document=_Document(file_id="d2", file_name="bad.exe", size=64))
-    attachments = extract_telegram_attachments(msg)
+    attachments = _run_extract(msg, bot=None)
     assert len(attachments) == 1
     assert attachments[0]["intake_decision"] == "block"
     assert "blocked_attachment_type" in attachments[0]["intake_reasons"]
+
+
+def test_extract_telegram_attachments_adds_text_preview_for_downloadable_files():
+    payload = b"hello world from telegram file"
+    bot = _FakeBot(payload)
+    msg = _Message(document=_Document(file_id="d3", file_name="notes.txt", mime_type="text/plain", size=len(payload)))
+    attachments = _run_extract(msg, bot=bot)
+    assert len(attachments) == 1
+    assert attachments[0]["intake_decision"] == "accept"
+    assert attachments[0]["text_preview"] == "hello world from telegram file"
+    assert attachments[0]["text_hash"] == hashlib.sha256(payload).hexdigest()
 
 
 def test_telegram_attachment_summary_includes_decisions():

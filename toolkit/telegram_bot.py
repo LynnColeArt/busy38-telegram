@@ -1065,7 +1065,7 @@ class Busy38TelegramBot:
                     ts = ts.replace(tzinfo=timezone.utc)
 
                 author = message.from_user
-                attachments = extract_telegram_attachments(message)
+                attachments = await extract_telegram_attachments(message, bot=self.application.bot)
                 safe_attachments = [sanitize_attachment_for_transcript(att) for att in attachments]
                 content = combined_text or ""
                 if safe_attachments and os.getenv("TELEGRAM_ATTACHMENT_INCLUDE_META", "1").strip().lower() not in (
