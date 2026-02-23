@@ -34,6 +34,12 @@ from telegram.ext import (
     filters
 )
 from .telegram_attachments import attachment_summary_line, extract_telegram_attachments, sanitize_attachment_for_transcript
+from core.cognition.attachment_intake import (
+    ATTACHMENT_DECISION_ACCEPT,
+    ATTACHMENT_DECISION_BLOCK,
+    ATTACHMENT_DECISION_QUARANTINE,
+    assess_text_ingress,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -279,7 +285,7 @@ class Busy38TelegramBot:
             return False, None
         text_l = text.lower()
         is_silent = text_l == "[no response required]" or "[no-response /]" in text_l
-        m = re.search(r"\\[\\s*react\\s*:\\s*([^\\]\\s]+)\\s*\\]", text, flags=re.IGNORECASE)
+        m = re.search(r"\[\s*react\s*:\s*([^\]\s]+)\s*\]", text, flags=re.IGNORECASE)
         reaction = m.group(1).strip() if m else None
         return is_silent, reaction
 
@@ -971,7 +977,8 @@ class Busy38TelegramBot:
         except Exception:
             bot_username = ""
 
-        is_follow_trigger = bool(cfg.subscribed and cfg.follow_mode and (not bool(message.text or "").startswith("/")))
+        is_command = bool(str(message.text or "").startswith("/"))
+        is_follow_trigger = bool(cfg.subscribed and cfg.follow_mode and (not is_command))
         text = message.text or ""
         caption = message.caption or ""
         combined_text = text or caption or ""
@@ -1019,6 +1026,21 @@ class Busy38TelegramBot:
             combined_text = combined_text.split(":", 1)[1].strip()
             is_mentioned = True
 
+        text_assessment = assess_text_ingress(combined_text)
+        intake_decision = str(text_assessment.get("decision") or ATTACHMENT_DECISION_ACCEPT)
+        intake_reasons = text_assessment.get("intake_reasons") or []
+        intake_policy_version = str(text_assessment.get("intake_policy_version") or "")
+        sanitized_content = str(text_assessment.get("sanitized_text") or "")
+        orchestrator_text = sanitized_content
+        if intake_decision == ATTACHMENT_DECISION_QUARANTINE and sanitized_content:
+            orchestrator_text = (
+                "[policy] Input received with policy warnings: "
+                + ", ".join(intake_reasons)
+                + "\n"
+                + sanitized_content
+            )
+        policy_blocked = intake_decision == ATTACHMENT_DECISION_BLOCK
+
         if not combined_text and is_command is False:
             trigger = "follow" if is_follow_trigger else "ingest"
         elif combined_text.startswith("/"):
@@ -1040,7 +1062,8 @@ class Busy38TelegramBot:
         msg_data = {
             'id': str(message.message_id),
             'chat_id': chat_id,
-            'text': combined_text,
+            'text': orchestrator_text,
+            'raw_text': combined_text,
             'from_user': {
                 'id': str(message.from_user.id) if message.from_user else None,
                 'username': message.from_user.username if message.from_user else None,
@@ -1052,6 +1075,9 @@ class Busy38TelegramBot:
             'trigger': trigger,
             'subscribed': bool(cfg.subscribed),
             'follow_mode': bool(cfg.follow_mode),
+            'intake_decision': intake_decision,
+            'intake_reasons': list(intake_reasons),
+            'intake_policy_version': intake_policy_version,
         }
 
         # Persist to Busy38 chat_entries (local-first) for pattern search + boards.
@@ -1067,7 +1093,9 @@ class Busy38TelegramBot:
                 author = message.from_user
                 attachments = await extract_telegram_attachments(message, bot=self.application.bot)
                 safe_attachments = [sanitize_attachment_for_transcript(att) for att in attachments]
-                content = combined_text or ""
+                content = orchestrator_text or ""
+                if policy_blocked and not content:
+                    content = "[policy] input blocked by policy"
                 if safe_attachments and os.getenv("TELEGRAM_ATTACHMENT_INCLUDE_META", "1").strip().lower() not in (
                     "0", "false", "no", "off"
                 ):
@@ -1090,6 +1118,9 @@ class Busy38TelegramBot:
                         "trigger": trigger,
                         "follow_mode": bool(cfg.follow_mode),
                         "attachments": safe_attachments,
+                        "intake_decision": intake_decision,
+                        "intake_reasons": list(intake_reasons),
+                        "intake_policy_version": intake_policy_version,
                     },
                     participants=[int(author.id)] if author and getattr(author, "id", None) is not None else None,
                 )
@@ -1120,12 +1151,15 @@ class Busy38TelegramBot:
                             "transport": "telegram",
                             "surface_id": surface_id,
                             "role": "user",
-                            "text": message.text or "",
+                            "text": orchestrator_text if not policy_blocked else "",
                             "metadata": {
                                 "chat_id": chat_id,
                                 "message_id": str(message.message_id),
                                 "author_id": str(message.from_user.id) if message.from_user else None,
                                 "author_username": getattr(message.from_user, "username", None) if message.from_user else None,
+                                "intake_decision": intake_decision,
+                                "intake_reasons": list(intake_reasons),
+                                "intake_policy_version": intake_policy_version,
                             },
                         },
                     )
@@ -1159,15 +1193,16 @@ class Busy38TelegramBot:
         if cm:
             cm.__enter__()
         try:
-            for callback in self.message_callbacks:
-                try:
-                    res = await callback(msg_data, context)
-                    if isinstance(res, dict) and bool(res.get("spoke") or res.get("responded") or res.get("sent")):
-                        responded = True
-                    elif res is True:
-                        responded = True
-                except Exception as e:
-                    logger.error(f"Error in message callback: {e}")
+            if not policy_blocked:
+                for callback in self.message_callbacks:
+                    try:
+                        res = await callback(msg_data, context)
+                        if isinstance(res, dict) and bool(res.get("spoke") or res.get("responded") or res.get("sent")):
+                            responded = True
+                        elif res is True:
+                            responded = True
+                    except Exception as e:
+                        logger.error(f"Error in message callback: {e}")
         finally:
             try:
                 if cm:
@@ -1175,7 +1210,18 @@ class Busy38TelegramBot:
             except Exception:
                 pass
 
-        if should_invoke and not responded:
+        if policy_blocked:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="⚠️ Input blocked by policy: " + ", ".join(intake_reasons),
+                    disable_web_page_preview=True,
+                )
+                responded = True
+            except Exception:
+                pass
+
+        if should_invoke and (not responded) and not policy_blocked:
             lock = self._lock_for_chat(chat_id)
             if lock.locked() and not (is_private or is_mentioned or is_reply_to_me or is_command):
                 return
@@ -1198,7 +1244,7 @@ class Busy38TelegramBot:
                     result = await self._invoke_agent_for_message(
                         chat_id=chat_id,
                         author_name=str(message.from_user) if message.from_user else "user",
-                        content=combined_text,
+                        content=orchestrator_text,
                         route_mode=route_mode,
                         route_target=route_target,
                         is_mentioned_or_reply=(is_mentioned or is_reply_to_me),
